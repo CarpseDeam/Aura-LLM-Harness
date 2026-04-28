@@ -59,6 +59,11 @@ class OllamaClient:
         self._timeout = timeout_seconds
         self._log_path = log_path if log_path is not None else Path.cwd() / ".aura" / "calls.jsonl"
 
+    @property
+    def default_model(self) -> str:
+        """Model name used when ``generate`` is called without an explicit model."""
+        return self._default_model
+
     def generate(
         self,
         prompt: str,

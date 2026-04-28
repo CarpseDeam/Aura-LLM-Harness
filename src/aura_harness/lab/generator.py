@@ -94,7 +94,7 @@ class CandidateGenerator:
 
         chosen_seed_base = base_seed if base_seed is not None else random.randint(0, _SEED_MAX)
         seeds = [chosen_seed_base + i for i in range(n)]
-        chosen_model = model or self._client._default_model  # noqa: SLF001
+        chosen_model = model or self._client.default_model
         batch_id = uuid.uuid4().hex
 
         logger.debug(

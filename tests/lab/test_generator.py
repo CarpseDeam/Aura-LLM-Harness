@@ -27,7 +27,7 @@ def _make_result(text: str = "ok", model: str = "test-model") -> CompletionResul
 
 def _mock_client(default_model: str = "test-model") -> MagicMock:
     client = MagicMock(spec=OllamaClient)
-    client._default_model = default_model
+    client.default_model = default_model
     return client
 
 
