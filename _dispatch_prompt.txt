@@ -1,29 +1,30 @@
-## Spec: Benchmark harness (v0 — single task, no extractor/decomposer)
+## Spec: Sharpen `bench/tasks/duplicate_finder/spec.md`
 
-Add an automated benchmark runner that exercises the existing CandidateGenerator against fixed task specs and logs pass/fail per candidate. Goal: establish a baseline pass rate today, before spec-extractor / decomposer / critic / reflexion are built. Subsequent dispatches will add the rest of the pipeline; this dispatch just builds the bench skeleton + the first task.
+The current spec says the right things but buries the two requirements that the 7B coder model keeps missing: function name/location at module level, and relative-forward-slash paths. Failure data: 16/24 candidates failed on path format (absolute Windows paths or backslashes), 7/24 failed on function name/scope (NameError on import or "no callable 'find_duplicates'"). The spec content is correct — we just need to surface those two contract points where the model can't ignore them.
 
-**Top-level layout:**
+**Change to `bench/tasks/duplicate_finder/spec.md` only.** Do not modify verify.py, fixtures, expected_report.json, or any other file.
 
-`bench/tasks/duplicate_finder/spec.md` — A committed spec for "duplicate file finder" written as the artifact the planner would have produced. Walks a directory tree, hashes files by content, groups duplicates, writes a JSON report to a path given as a CLI arg. Specify: function/CLI signature the candidate must produce, input/output contract (input = directory path, output = JSON report path), what counts as a duplicate (identical content, any size > 0), behavior on unreadable files (skip with warning to stderr), report shape (list of groups, each group is a list of paths sorted lexicographically; groups themselves sorted by the first path). Keep the spec tight and unambiguous — this is what we're measuring against.
+Add a new section titled "Critical contract requirements" immediately after the opening paragraph (before the existing "Function signature" section). It should be three blunt bullets covering:
 
-`bench/tasks/duplicate_finder/verify.py` — Standalone Python script. Invoked as `python verify.py <candidate_module_path> <fixtures_dir> <output_json_path>`. Imports the candidate module, runs it against the fixture directory, compares the produced JSON report against expected output, exits 0 on pass and non-zero on fail with a diff to stderr. The verifier is the source of truth for "did the candidate work" — keep it strict, deterministic, and self-contained.
+1. The function must be named exactly `find_duplicates` and defined at module top level. Not nested inside a class, not nested inside `if __name__ == "__main__":`. The verifier imports the module and calls `module.find_duplicates(...)` directly — anything else fails.
 
-`bench/tasks/duplicate_finder/fixtures/` — A small directory of test files: at least two duplicate groups (different content per group, multiple files per group), at least one unique file, at least one empty file (which should not count as a duplicate group). Include an `expected_report.json` alongside (sibling to `fixtures/`, not inside it) that the verifier compares against.
+2. Paths in the JSON output must be **relative to the `directory` argument**, not absolute. Use `pathlib.Path(p).relative_to(directory)` or equivalent.
 
-`src/aura_harness/bench/__init__.py` — Exports for the package.
+3. Paths must use forward slashes on every platform, including Windows. Use `.as_posix()` on the relative `Path` — do not use `str(path)` because that emits backslashes on Windows.
 
-`src/aura_harness/bench/runner.py` — Core runner. Public entry point takes a task name, runs count, candidate count per run, and model name. For each run: invokes the existing `CandidateGenerator` with the spec.md content as the prompt, gets N candidates, for each candidate writes the extracted code to a temp file, invokes `verify.py` as a subprocess, captures pass/fail + stderr. Returns a structured result. Use `Extractor` and existing scoring infra for getting code out of candidates; do not duplicate that logic. Subprocess timeout per verify invocation: configurable via `Final[float]`, default 30s.
+Then add a brief "Minimal example" section right after the existing "Report shape" section, showing the canonical path-conversion pattern in roughly 5-8 lines:
 
-`src/aura_harness/bench/session.py` — Session output management. Creates `sessions/run-<NNN>-<task>-<timestamp>/` where NNN is a zero-padded incrementing index based on existing folders. Writes `config.json` (task, runs, n, model, harness git sha via `git rev-parse HEAD`, start time), `batches/batch-<NNN>.jsonl` (one batch per run, raw candidate output + extraction result), `results.json` (per-candidate pass/fail + verify stderr, indexed by run/candidate), `summary.json` (aggregate: total candidates, passes, pass_rate, mean latency per candidate, model used). Frozen dataclasses for the structured types; serialize via `dataclasses.asdict` or equivalent.
+```python
+from pathlib import Path
 
-`src/aura_harness/bench/__main__.py` — CLI entry. `python -m aura_harness.bench --task <name> --runs <int> --n <int> --model <name>`. Defaults: runs=3, n=3, model=qwen2.5-coder:7b. Prints session folder path on start, prints summary on completion.
+base = Path(directory)
+for absolute_file_path in matched_files:
+    relative = absolute_file_path.relative_to(base).as_posix()
+    # 'relative' is what goes into the JSON
+```
 
-**Conventions:**
+Keep the existing content intact otherwise. The goal is to make the two contract requirements impossible to miss — short, blunt, with a code pattern that resolves both at once.
 
-`from __future__ import annotations` everywhere. Type hints throughout. Frozen dataclasses for structured types (`BenchConfig`, `CandidateResult`, `RunResult`, `SessionSummary`). `Final[...]` module-level constants for tunables (default timeout, default runs, default N, default model, sessions root path). Mirror existing idioms from `lab/`, `scoring/`, `scaffold/`. JSONL where streaming makes sense (batches), JSON where a single document makes sense (config, results, summary). Bench output goes under a top-level `sessions/` directory at the project root; create on first run if missing.
-
-**Definition of done:**
-
-Running `python -m aura_harness.bench --task duplicate_finder --runs 3 --n 3` produces a `sessions/run-NNN-duplicate_finder-<ts>/` folder with config.json, batches/, results.json, summary.json. Each candidate has been extracted, written to a temp file, verified by subprocess, and its pass/fail recorded. Summary reports a real pass rate. The verifier's expected_report.json is correct for the fixture directory contents. Bench code is fully separate from the existing `lab/scoring/ui` packages — it depends on them, nothing depends on it.
+**Definition of done:** spec.md has the new "Critical contract requirements" section near the top and the "Minimal example" snippet. No other files touched.
 
 Be methodical. Read what you need, make the change, stop. Match existing code style. Type hints everywhere.

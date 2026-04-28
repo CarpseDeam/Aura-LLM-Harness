@@ -1,0 +1,8 @@
+{
+  "task": "duplicate_finder",
+  "model": "qwen2.5-coder:7b",
+  "total_candidates": 25,
+  "passes": 1,
+  "pass_rate": 0.04,
+  "mean_latency_ms": 15329.90246800001
+}

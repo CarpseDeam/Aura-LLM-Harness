@@ -3,6 +3,18 @@
 Write a Python module that walks a directory tree, identifies groups of files
 with identical content, and writes a JSON report.
 
+## Critical contract requirements
+
+- The function must be named exactly `find_duplicates` and defined at module
+  top level. Not nested inside a class, not nested inside
+  `if __name__ == "__main__":`. The verifier imports the module and calls
+  `module.find_duplicates(...)` directly — anything else fails.
+- Paths in the JSON output must be **relative to the `directory` argument**,
+  not absolute. Use `pathlib.Path(p).relative_to(directory)` or equivalent.
+- Paths must use forward slashes on every platform, including Windows. Use
+  `.as_posix()` on the relative `Path` — do not use `str(path)` because that
+  emits backslashes on Windows.
+
 ## Function signature
 
 The module must define exactly one public function:
@@ -59,6 +71,20 @@ Write JSON to `output_path` with the following structure:
   string ordering).
 - Groups themselves are sorted by their first path (lexicographic).
 - If there are no duplicate groups, write an empty list: `[]`.
+
+## Minimal example
+
+Canonical path-conversion pattern that satisfies the relative-path and
+forward-slash requirements at once:
+
+```python
+from pathlib import Path
+
+base = Path(directory)
+for absolute_file_path in matched_files:
+    relative = absolute_file_path.relative_to(base).as_posix()
+    # 'relative' is what goes into the JSON
+```
 
 ## Output requirements
 
