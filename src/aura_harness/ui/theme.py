@@ -11,6 +11,9 @@ ACCENT_HOVER: Final[str] = "#90CAF9"
 ACCENT_PRESSED: Final[str] = "#42A5F5"
 BORDER: Final[str] = "#3a3a3a"
 PLACEHOLDER: Final[str] = "#7a7a7a"
+SUCCESS: Final[str] = "#66BB6A"
+ERROR: Final[str] = "#E57373"
+MUTED: Final[str] = "#888888"
 
 MONO_FAMILY_PRIMARY: Final[str] = "JetBrains Mono"
 MONO_FAMILY_FALLBACKS: Final[tuple[str, ...]] = ("Consolas", "Menlo", "Monaco", "Courier New")

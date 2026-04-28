@@ -6,16 +6,20 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
+from aura_harness.lab import CandidateGenerator
+from aura_harness.llm import OllamaClient
 from aura_harness.ui.main_window import MainWindow
 
 
 def main() -> int:
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
     app = QApplication(sys.argv)
-    window = MainWindow()
+    client = OllamaClient()
+    generator = CandidateGenerator(client)
+    window = MainWindow(client, generator)
     window.show()
     return app.exec()
 
