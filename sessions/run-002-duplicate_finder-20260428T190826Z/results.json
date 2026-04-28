@@ -1,0 +1,289 @@
+{
+  "runs": [
+    {
+      "run_index": 0,
+      "batch_id": "6162326448e8449aad4a0e9dd64cbb7c",
+      "candidates": [
+        {
+          "run_index": 0,
+          "candidate_index": 0,
+          "seed": 1269548143,
+          "passed": false,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": "report mismatch:\n  expected (2 groups):\n    ['a.txt', 'c.log', 'nested/b.txt']\n    ['dup1.bin', 'subdir/dup2.bin']\n  actual (2 groups):\n    ['C:/Projects/Aura-LLM-Harness/bench/tasks/duplicate_finder/fixtures/a.txt', 'C:/Projects/Aura-LLM-Harness/bench/tasks/duplicate_finder/fixtures/c.log', 'C:/Projects/Aura-LLM-Harness/bench/tasks/duplicate_finder/fixtures/nested/b.txt']\n    ['C:/Projects/Aura-LLM-Harness/bench/tasks/duplicate_finder/fixtures/dup1.bin', 'C:/Projects/Aura-LLM-Harness/bench/tasks/duplicate_finder/fixtures/subdir/dup2.bin']\n",
+          "latency_ms": 7203.780800000004
+        },
+        {
+          "run_index": 0,
+          "candidate_index": 1,
+          "seed": 1269548144,
+          "passed": false,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": "verify error: find_duplicates raised: AttributeError(\"'str' object has no attribute 'as_posix'\")\n",
+          "latency_ms": 11289.854399999967
+        },
+        {
+          "run_index": 0,
+          "candidate_index": 2,
+          "seed": 1269548145,
+          "passed": false,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": "report mismatch:\n  expected (2 groups):\n    ['a.txt', 'c.log', 'nested/b.txt']\n    ['dup1.bin', 'subdir/dup2.bin']\n  actual (2 groups):\n    ['C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\a.txt', 'C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\c.log', 'C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\nested\\\\b.txt']\n    ['C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\dup1.bin', 'C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\subdir\\\\dup2.bin']\n",
+          "latency_ms": 18495.337300000072
+        },
+        {
+          "run_index": 0,
+          "candidate_index": 3,
+          "seed": 1269548146,
+          "passed": true,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": null,
+          "latency_ms": 14909.216099999867
+        },
+        {
+          "run_index": 0,
+          "candidate_index": 4,
+          "seed": 1269548147,
+          "passed": true,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": null,
+          "latency_ms": 22773.92329999998
+        }
+      ],
+      "run_duration_ms": 23073.902699999962
+    },
+    {
+      "run_index": 1,
+      "batch_id": "fd81f6c1c066423091ae947f3372aa76",
+      "candidates": [
+        {
+          "run_index": 1,
+          "candidate_index": 0,
+          "seed": 1363824358,
+          "passed": true,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": null,
+          "latency_ms": 19110.643799999933
+        },
+        {
+          "run_index": 1,
+          "candidate_index": 1,
+          "seed": 1363824359,
+          "passed": false,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": "verify error: candidate has no callable 'find_duplicates'\n",
+          "latency_ms": 6555.577000000085
+        },
+        {
+          "run_index": 1,
+          "candidate_index": 2,
+          "seed": 1363824360,
+          "passed": true,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": null,
+          "latency_ms": 17265.73610000014
+        },
+        {
+          "run_index": 1,
+          "candidate_index": 3,
+          "seed": 1363824361,
+          "passed": false,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": "report mismatch:\n  expected (2 groups):\n    ['a.txt', 'c.log', 'nested/b.txt']\n    ['dup1.bin', 'subdir/dup2.bin']\n  actual (2 groups):\n    ['C:/Projects/Aura-LLM-Harness/bench/tasks/duplicate_finder/fixtures/a.txt', 'C:/Projects/Aura-LLM-Harness/bench/tasks/duplicate_finder/fixtures/c.log', 'C:/Projects/Aura-LLM-Harness/bench/tasks/duplicate_finder/fixtures/nested/b.txt']\n    ['C:/Projects/Aura-LLM-Harness/bench/tasks/duplicate_finder/fixtures/dup1.bin', 'C:/Projects/Aura-LLM-Harness/bench/tasks/duplicate_finder/fixtures/subdir/dup2.bin']\n",
+          "latency_ms": 10629.880999999841
+        },
+        {
+          "run_index": 1,
+          "candidate_index": 4,
+          "seed": 1363824362,
+          "passed": false,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": "report mismatch:\n  expected (2 groups):\n    ['a.txt', 'c.log', 'nested/b.txt']\n    ['dup1.bin', 'subdir/dup2.bin']\n  actual (2 groups):\n    ['a.txt', 'c.log', 'nested\\\\b.txt']\n    ['dup1.bin', 'subdir\\\\dup2.bin']\n",
+          "latency_ms": 15053.515300000072
+        }
+      ],
+      "run_duration_ms": 19413.89990000016
+    },
+    {
+      "run_index": 2,
+      "batch_id": "6e612de03fc24455a292284d503b4344",
+      "candidates": [
+        {
+          "run_index": 2,
+          "candidate_index": 0,
+          "seed": 1401808574,
+          "passed": false,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": "report mismatch:\n  expected (2 groups):\n    ['a.txt', 'c.log', 'nested/b.txt']\n    ['dup1.bin', 'subdir/dup2.bin']\n  actual (2 groups):\n    ['C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\a.txt', 'C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\c.log', 'C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\nested\\\\b.txt']\n    ['C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\dup1.bin', 'C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\subdir\\\\dup2.bin']\n",
+          "latency_ms": 8516.500700000051
+        },
+        {
+          "run_index": 2,
+          "candidate_index": 1,
+          "seed": 1401808575,
+          "passed": false,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": "report mismatch:\n  expected (2 groups):\n    ['a.txt', 'c.log', 'nested/b.txt']\n    ['dup1.bin', 'subdir/dup2.bin']\n  actual (2 groups):\n    ['a.txt', 'c.log', 'nested\\\\b.txt']\n    ['dup1.bin', 'subdir\\\\dup2.bin']\n",
+          "latency_ms": 18993.617099999938
+        },
+        {
+          "run_index": 2,
+          "candidate_index": 2,
+          "seed": 1401808576,
+          "passed": false,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": "verify error: failed to import candidate: NameError(\"name 'find_duplicates' is not defined\")\n",
+          "latency_ms": 15087.930899999947
+        },
+        {
+          "run_index": 2,
+          "candidate_index": 3,
+          "seed": 1401808577,
+          "passed": false,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": "report mismatch:\n  expected (2 groups):\n    ['a.txt', 'c.log', 'nested/b.txt']\n    ['dup1.bin', 'subdir/dup2.bin']\n  actual (2 groups):\n    ['C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\a.txt', 'C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\c.log', 'C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\nested\\\\b.txt']\n    ['C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\dup1.bin', 'C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\subdir\\\\dup2.bin']\n",
+          "latency_ms": 11333.149000000049
+        },
+        {
+          "run_index": 2,
+          "candidate_index": 4,
+          "seed": 1401808578,
+          "passed": false,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": "report mismatch:\n  expected (2 groups):\n    ['a.txt', 'c.log', 'nested/b.txt']\n    ['dup1.bin', 'subdir/dup2.bin']\n  actual (2 groups):\n    ['a.txt', 'c.log', 'nested\\\\b.txt']\n    ['dup1.bin', 'subdir\\\\dup2.bin']\n",
+          "latency_ms": 6394.0728999998555
+        }
+      ],
+      "run_duration_ms": 19281.148900000062
+    },
+    {
+      "run_index": 3,
+      "batch_id": "fd32da24045f44efa69a17c04c73f922",
+      "candidates": [
+        {
+          "run_index": 3,
+          "candidate_index": 0,
+          "seed": 105648048,
+          "passed": false,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": "verify error: find_duplicates raised: TypeError('Object of type WindowsPath is not JSON serializable')\n",
+          "latency_ms": 5307.593999999881
+        },
+        {
+          "run_index": 3,
+          "candidate_index": 1,
+          "seed": 105648049,
+          "passed": false,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": "verify error: failed to import candidate: NameError(\"name 'find_duplicates' is not defined\")\n",
+          "latency_ms": 19314.91260000007
+        },
+        {
+          "run_index": 3,
+          "candidate_index": 2,
+          "seed": 105648050,
+          "passed": false,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": "report mismatch:\n  expected (2 groups):\n    ['a.txt', 'c.log', 'nested/b.txt']\n    ['dup1.bin', 'subdir/dup2.bin']\n  actual (2 groups):\n    ['C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\a.txt', 'C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\c.log', 'C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\nested\\\\b.txt']\n    ['C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\dup1.bin', 'C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\subdir\\\\dup2.bin']\n",
+          "latency_ms": 14386.865499999885
+        },
+        {
+          "run_index": 3,
+          "candidate_index": 3,
+          "seed": 105648051,
+          "passed": false,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": "verify error: candidate has no callable 'find_duplicates'\n",
+          "latency_ms": 11106.792799999994
+        },
+        {
+          "run_index": 3,
+          "candidate_index": 4,
+          "seed": 105648052,
+          "passed": false,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": "report mismatch:\n  expected (2 groups):\n    ['a.txt', 'c.log', 'nested/b.txt']\n    ['dup1.bin', 'subdir/dup2.bin']\n  actual (2 groups):\n    ['a.txt', 'c.log', 'nested\\\\b.txt']\n    ['dup1.bin', 'subdir\\\\dup2.bin']\n",
+          "latency_ms": 23251.367300000085
+        }
+      ],
+      "run_duration_ms": 23531.48470000019
+    },
+    {
+      "run_index": 4,
+      "batch_id": "844d050771fd452b981a7dd48171c10a",
+      "candidates": [
+        {
+          "run_index": 4,
+          "candidate_index": 0,
+          "seed": 195372922,
+          "passed": false,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": "report mismatch:\n  expected (2 groups):\n    ['a.txt', 'c.log', 'nested/b.txt']\n    ['dup1.bin', 'subdir/dup2.bin']\n  actual (2 groups):\n    ['C:/Projects/Aura-LLM-Harness/bench/tasks/duplicate_finder/fixtures/a.txt', 'C:/Projects/Aura-LLM-Harness/bench/tasks/duplicate_finder/fixtures/c.log', 'C:/Projects/Aura-LLM-Harness/bench/tasks/duplicate_finder/fixtures/nested/b.txt']\n    ['C:/Projects/Aura-LLM-Harness/bench/tasks/duplicate_finder/fixtures/dup1.bin', 'C:/Projects/Aura-LLM-Harness/bench/tasks/duplicate_finder/fixtures/subdir/dup2.bin']\n",
+          "latency_ms": 8222.050500000023
+        },
+        {
+          "run_index": 4,
+          "candidate_index": 1,
+          "seed": 195372923,
+          "passed": false,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": "verify error: find_duplicates raised: NameError(\"name 'sys' is not defined\")\n",
+          "latency_ms": 19783.260800000106
+        },
+        {
+          "run_index": 4,
+          "candidate_index": 2,
+          "seed": 195372924,
+          "passed": false,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": "verify error: failed to import candidate: NameError(\"name 'find_duplicates' is not defined\")\n",
+          "latency_ms": 14967.96489999997
+        },
+        {
+          "run_index": 4,
+          "candidate_index": 3,
+          "seed": 195372925,
+          "passed": false,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": "verify error: find_duplicates raised: TypeError('Object of type WindowsPath is not JSON serializable')\n",
+          "latency_ms": 10497.487299999875
+        },
+        {
+          "run_index": 4,
+          "candidate_index": 4,
+          "seed": 195372926,
+          "passed": false,
+          "extraction_method": "fenced_python",
+          "candidate_error": null,
+          "verify_stderr": "report mismatch:\n  expected (2 groups):\n    ['a.txt', 'c.log', 'nested/b.txt']\n    ['dup1.bin', 'subdir/dup2.bin']\n  actual (2 groups):\n    ['C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\a.txt', 'C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\c.log', 'C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\nested\\\\b.txt']\n    ['C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\dup1.bin', 'C:\\\\Projects\\\\Aura-LLM-Harness\\\\bench\\\\tasks\\\\duplicate_finder\\\\fixtures\\\\subdir\\\\dup2.bin']\n",
+          "latency_ms": 6234.245500000043
+        }
+      ],
+      "run_duration_ms": 20071.667500000105
+    }
+  ]
+}

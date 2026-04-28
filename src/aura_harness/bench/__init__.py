@@ -10,6 +10,7 @@ from __future__ import annotations
 from aura_harness.bench.models import (
     BenchConfig,
     CandidateResult,
+    RoundResult,
     RunResult,
     SessionSummary,
 )
@@ -18,6 +19,7 @@ from aura_harness.bench.runner import run_bench
 __all__ = [
     "BenchConfig",
     "CandidateResult",
+    "RoundResult",
     "RunResult",
     "SessionSummary",
     "run_bench",

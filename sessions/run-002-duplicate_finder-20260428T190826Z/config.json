@@ -1,0 +1,9 @@
+{
+  "task": "duplicate_finder",
+  "runs": 5,
+  "n": 5,
+  "model": "qwen2.5-coder:7b",
+  "timeout_seconds": 30.0,
+  "harness_git_sha": "afb2f19bd80c2a2991c77b83905b2ffc500b5ccf",
+  "start_time": "2026-04-28T19:08:26.955393+00:00"
+}

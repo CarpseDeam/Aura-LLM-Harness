@@ -8,7 +8,8 @@ folder layout is:
     sessions/run-NNN-task-ts/
         config.json              # the BenchConfig
         batches/
-            batch-000.jsonl      # one JSONL record per candidate in run 0
+            batch-000.jsonl      # one JSONL record per candidate slot in run 0,
+                                 # with all reflexion rounds nested under "rounds"
             batch-001.jsonl      # ... etc
         results.json             # all RunResults
         summary.json             # the SessionSummary
@@ -23,14 +24,16 @@ import re
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from aura_harness.bench.models import (
     BenchConfig,
+    CandidateResult,
+    RoundResult,
     RunResult,
     SessionSummary,
 )
-from aura_harness.lab.models import CandidateBatch
+from aura_harness.lab.models import Candidate, CandidateBatch
 
 _SESSION_DIR_RE: Final[re.Pattern[str]] = re.compile(r"^run-(\d+)-")
 _TIMESTAMP_FMT: Final[str] = "%Y%m%dT%H%M%SZ"
@@ -78,31 +81,22 @@ def write_batch(
     batch: CandidateBatch,
     run_result: RunResult,
 ) -> None:
-    """Write the per-candidate raw output + extraction outcome for one run.
+    """Write the per-slot raw output + per-round outcomes for one run.
 
-    One JSONL record per candidate, in batch order. Each record carries the
-    raw model text (so we can re-extract / re-verify offline later) plus the
-    extraction method and pass/fail recorded by the runner.
+    One JSONL record per candidate slot, in batch order. Each record carries
+    the round-0 raw model text plus a ``rounds`` array containing every
+    reflexion round (its raw text, extraction outcome, verifier verdict, and
+    the critique that triggered it).
     """
     path = session_dir / "batches" / _BATCH_FILENAME_FMT.format(idx=run_index)
     with path.open("w", encoding="utf-8") as fh:
         for cand, cresult in zip(batch.candidates, run_result.candidates):
-            record = {
-                "run_index": run_index,
-                "candidate_index": cand.index,
-                "seed": cand.seed,
-                "is_success": cand.is_success,
-                "raw_text": cand.text,
-                "error": cand.error,
-                "wall_duration_ms": cand.wall_duration_ms,
-                "extraction_method": cresult.extraction_method,
-                "passed": cresult.passed,
-            }
+            record = _build_batch_record(cand, cresult)
             fh.write(json.dumps(record) + "\n")
 
 
 def write_results(session_dir: Path, runs: list[RunResult]) -> None:
-    """Write the per-candidate verdicts to ``results.json``."""
+    """Write the per-slot, per-round verdicts to ``results.json``."""
     payload = {"runs": [asdict(r) for r in runs]}
     path = session_dir / "results.json"
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -112,3 +106,39 @@ def write_summary(session_dir: Path, summary: SessionSummary) -> None:
     """Write the aggregate :class:`SessionSummary` to ``summary.json``."""
     path = session_dir / "summary.json"
     path.write_text(json.dumps(asdict(summary), indent=2), encoding="utf-8")
+
+
+def _build_batch_record(cand: Candidate, cresult: CandidateResult) -> dict[str, Any]:
+    """Build the JSONL record for one candidate slot in a batch file."""
+    return {
+        "run_index": cresult.run_index,
+        "candidate_index": cand.index,
+        "seed": cand.seed,
+        "is_success": cand.is_success,
+        "round_zero_raw_text": cand.text,
+        "round_zero_error": cand.error,
+        "round_zero_wall_duration_ms": cand.wall_duration_ms,
+        "passed": cresult.passed,
+        "round_zero_passed": cresult.round_zero_passed,
+        "round_count": len(cresult.rounds),
+        "rounds": [_round_to_record(r) for r in cresult.rounds],
+    }
+
+
+def _round_to_record(round_result: RoundResult) -> dict[str, Any]:
+    """Serialize one :class:`RoundResult` for the batch JSONL."""
+    critique_payload = (
+        asdict(round_result.critique) if round_result.critique is not None else None
+    )
+    return {
+        "round_index": round_result.round_index,
+        "seed": round_result.seed,
+        "passed": round_result.passed,
+        "extraction_method": round_result.extraction_method,
+        "candidate_error": round_result.candidate_error,
+        "verify_stderr": round_result.verify_stderr,
+        "latency_ms": round_result.latency_ms,
+        "raw_text": round_result.raw_text,
+        "extracted_code": round_result.extracted_code,
+        "critique": critique_payload,
+    }

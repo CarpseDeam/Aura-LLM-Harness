@@ -1,30 +1,29 @@
-## Spec: Sharpen `bench/tasks/duplicate_finder/spec.md`
+## Spec: Critic + reflexion loop for the bench
 
-The current spec says the right things but buries the two requirements that the 7B coder model keeps missing: function name/location at module level, and relative-forward-slash paths. Failure data: 16/24 candidates failed on path format (absolute Windows paths or backslashes), 7/24 failed on function name/scope (NameError on import or "no callable 'find_duplicates'"). The spec content is correct — we just need to surface those two contract points where the model can't ignore them.
+Add a critic that reviews each candidate against the task spec and produces a structured critique, plus a reflexion loop in the bench runner that feeds critiques back to retry failed candidates. This is the core architecture move — local model + small coder + critic + retry should beat one-shot generation. Bench is the venue we measure it in.
 
-**Change to `bench/tasks/duplicate_finder/spec.md` only.** Do not modify verify.py, fixtures, expected_report.json, or any other file.
+**File layout:**
 
-Add a new section titled "Critical contract requirements" immediately after the opening paragraph (before the existing "Function signature" section). It should be three blunt bullets covering:
+`src/aura_harness/critic/__init__.py` — package exports.
 
-1. The function must be named exactly `find_duplicates` and defined at module top level. Not nested inside a class, not nested inside `if __name__ == "__main__":`. The verifier imports the module and calls `module.find_duplicates(...)` directly — anything else fails.
+`src/aura_harness/critic/models.py` — Frozen dataclasses for the structured critique output. At minimum: a `Critique` type with a boolean indicating whether the candidate passes review, a tuple of violation strings (concrete, mechanical contract issues — "function `find_duplicates` is not at module level", "code calls `.as_posix()` on a string instead of a Path"), and a tuple of suggestion strings (terse fixes — "use `Path(p).relative_to(directory).as_posix()`"). Keep the type small and serializable.
 
-2. Paths in the JSON output must be **relative to the `directory` argument**, not absolute. Use `pathlib.Path(p).relative_to(directory)` or equivalent.
+`src/aura_harness/critic/critic_client.py` — Stateless service mirroring the shape of `PlannerClient` and `OllamaClient`. Public method takes the spec text and the candidate's raw code, calls the reasoning model via `OllamaClient.chat`, and returns a `Critique`. Default model is a `Final[str]` constant — pick `deepseek-r1:14b` since the user has it. The system prompt frames the model as a code reviewer: read the spec, read the candidate, find concrete contract violations, output structured JSON. Strongly prompt for JSON-only output and parse with a tolerant extractor (look for the first `{...}` block, fall back to error). On parse failure, return a `Critique` with `passed=False` and a single violation string explaining the parse error — never raise. Log critic calls to `.aura/critic.jsonl` mirroring the existing logging pattern.
 
-3. Paths must use forward slashes on every platform, including Windows. Use `.as_posix()` on the relative `Path` — do not use `str(path)` because that emits backslashes on Windows.
+`src/aura_harness/bench/runner.py` — Extend the existing runner with reflexion. Add a new optional parameter to `run_bench` for the maximum number of critic rounds (default 0 = current behavior, no critic). When `max_rounds > 0`: after a candidate fails verification, call the critic on the candidate's code + spec. If the critic produces violations, construct a follow-up prompt that includes the original spec, the candidate's code, the critique's violations and suggestions, and a clear instruction to produce a corrected version. Send that follow-up to the existing `CandidateGenerator` for ONE candidate (not N) and re-verify. Repeat up to `max_rounds` times. Each round's candidate is logged separately. The final pass/fail for that candidate slot is whichever round (if any) passed. Keep the original candidate's seed for reproducibility; new rounds get fresh seeds.
 
-Then add a brief "Minimal example" section right after the existing "Report shape" section, showing the canonical path-conversion pattern in roughly 5-8 lines:
+`src/aura_harness/bench/models.py` — Extend `CandidateResult` (or add a sibling type) so each round of reflexion is captured: round index, the critique that triggered the retry, the new candidate's code, pass/fail. Existing single-shot results are round 0 with no critique.
 
-```python
-from pathlib import Path
+`src/aura_harness/bench/__main__.py` — Add `--critic-rounds <int>` CLI flag (default 0). When > 0, the runner invokes the critic loop. Add `--critic-model <name>` (default `deepseek-r1:14b`) so the user can swap reasoning models without code changes.
 
-base = Path(directory)
-for absolute_file_path in matched_files:
-    relative = absolute_file_path.relative_to(base).as_posix()
-    # 'relative' is what goes into the JSON
-```
+`src/aura_harness/bench/session.py` — Update batch JSONL and results.json to capture the per-round detail. Summary should report both the one-shot pass rate (round 0 only) and the final pass rate (any round passed) so the critic's contribution is legible at a glance.
 
-Keep the existing content intact otherwise. The goal is to make the two contract requirements impossible to miss — short, blunt, with a code pattern that resolves both at once.
+**Conventions:**
 
-**Definition of done:** spec.md has the new "Critical contract requirements" section near the top and the "Minimal example" snippet. No other files touched.
+`from __future__ import annotations` everywhere. Type hints throughout. Frozen dataclasses for structured types. `Final[...]` for the critic model name, max parse attempts, default round count, and any prompt-related constants. Mirror existing idioms from `planner/`, `lab/`, `scoring/`, `bench/`. The critic is fully separate from the existing pipeline — `lab/` and `scoring/` should not import from `critic/`. The bench runner is the only consumer.
+
+**Definition of done:**
+
+`python -m aura_harness.bench --task duplicate_finder --runs 5 --n 5 --critic-rounds 2` runs the full reflexion loop. Session output captures every round of every candidate with its critique. Summary reports one-shot pass rate vs final pass rate. Existing `--critic-rounds 0` behavior is identical to today's runner. Critic JSONL logs every call.
 
 Be methodical. Read what you need, make the change, stop. Match existing code style. Type hints everywhere.
