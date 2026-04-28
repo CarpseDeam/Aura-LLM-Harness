@@ -32,4 +32,14 @@ python -m aura_harness.scoring "PROMPT" \
     --test "assert add(1,2)==3"
 ```
 
+For more complex tests, use `--test-file` to load Python code from a file:
+
+```bash
+python -m aura_harness.scoring "PROMPT" \
+    --expect add \
+    --test-file tests/my_tests.py
+```
+
+`--test` and `--test-file` are mutually exclusive. Use `--test-file` for multiline tests to avoid shell mangling.
+
 This performs generation, extraction, and validation in one command.
