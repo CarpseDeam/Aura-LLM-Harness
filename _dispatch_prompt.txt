@@ -1,0 +1,138 @@
+## Spec: Candidate generator (the "lab")
+
+This is the core of the harness's thesis: local models are free per-call, so instead of trying to one-shot a prompt, we generate N candidates in parallel and let a controller pick winners later. This module is the engine that produces those N candidates from a single prompt.
+
+This dispatch builds the generator standalone. No controller, no scoring, no winner-picking — just "give me N attempts at this prompt." The controller comes next.
+
+### Layout
+- `src/aura_harness/lab/__init__.py` — re-export `CandidateGenerator`, `Candidate`, `CandidateBatch`
+- `src/aura_harness/lab/models.py` — `Candidate`, `CandidateBatch` dataclasses
+- `src/aura_harness/lab/generator.py` — `CandidateGenerator` class
+- `src/aura_harness/lab/__main__.py` — CLI smoke test
+- `tests/lab/__init__.py`
+- `tests/lab/test_generator.py` — unit tests with mocked OllamaClient
+
+### Dependencies
+- `concurrent.futures.ThreadPoolExecutor` (stdlib, no new dep)
+- Reuse the existing `OllamaClient` from `aura_harness.llm`
+
+### Data classes (`models.py`)
+
+```python
+@dataclass(frozen=True)
+class Candidate:
+    index: int                          # 0..n-1, position in the batch
+    seed: int                           # the seed used for this generation
+    result: CompletionResult | None     # None if generation failed
+    error: str | None                   # error message, None if successful
+    wall_duration_ms: float             # wall-clock time for this candidate
+    
+    @property
+    def is_success(self) -> bool: ...
+    
+    @property
+    def text(self) -> str | None: ...   # convenience: result.text if success else None
+
+
+@dataclass(frozen=True)
+class CandidateBatch:
+    batch_id: str                       # uuid4 hex
+    prompt: str
+    model: str
+    n_requested: int
+    candidates: list[Candidate]         # always len == n_requested, ordered by index
+    total_wall_duration_ms: float       # wall time for the whole batch
+    
+    @property
+    def successful(self) -> list[Candidate]: ...
+    
+    @property
+    def failed(self) -> list[Candidate]: ...
+    
+    @property
+    def success_count(self) -> int: ...
+```
+
+### Generator API (`generator.py`)
+
+```python
+class CandidateGenerator:
+    def __init__(
+        self,
+        client: OllamaClient,
+        max_workers: int = 5,
+        log_path: Path | None = None,   # batch-level log; defaults to .aura/batches.jsonl
+    ) -> None: ...
+    
+    def generate(
+        self,
+        prompt: str,
+        n: int,
+        *,
+        model: str | None = None,            # falls back to client.default_model
+        system: str | None = None,
+        temperature: float = 0.5,            # higher than client default of 0.2 for diversity
+        base_seed: int | None = None,        # if None, randomized; seed_i = base_seed + i
+        num_predict: int | None = None,
+    ) -> CandidateBatch: ...
+```
+
+### Behavior
+- Submit N tasks to a `ThreadPoolExecutor(max_workers=max_workers)`. Each task calls `client.generate(...)` with `seed = base_seed + index` and identical prompt/model/system/temperature/num_predict.
+- If one candidate raises (any exception, including `OllamaError`), catch it and store `error=str(exc)`, `result=None` for that Candidate. Other candidates keep going.
+- Time each candidate with `time.perf_counter()` for wall_duration_ms. Time the whole batch the same way for total_wall_duration_ms.
+- Candidates returned in the CandidateBatch must be ordered by index (0..n-1), regardless of completion order.
+- Generate `batch_id` with `uuid.uuid4().hex`.
+- After the batch completes, append one JSON line to the batch log path:
+  - `{timestamp, batch_id, model, prompt_preview (first 200 chars), n_requested, success_count, total_wall_duration_ms, mean_candidate_wall_ms (over successful), seeds (list of ints used)}`
+- Auto-create the log directory if missing.
+- The OllamaClient is already logging per-call to `.aura/calls.jsonl` — don't duplicate. The batch log is separate and summary-level.
+
+### Concurrency note (worth a code comment)
+Ollama's `OLLAMA_NUM_PARALLEL` env var caps how many requests it processes concurrently per model (default 1 on older versions, 4 on newer). If it's lower than `max_workers`, Ollama queues; the generator still works correctly, it just doesn't get the full speedup. Mention this in the module docstring so users know the knob exists.
+
+### CLI smoke test (`__main__.py`)
+```
+python -m aura_harness.lab "write a haiku about debugging" --n 5
+python -m aura_harness.lab "..." --n 5 --model qwen3.5:latest --temperature 0.7 --seed 42
+```
+- Default n=3, default temperature=0.5
+- `--model NAME` overrides default
+- `--system "..."` optional system prompt
+- `--seed INT` sets base_seed (default: random)
+- Output: a header line ("Batch <id>: <n> candidates, <success_count> succeeded in <total>ms"), then for each candidate either `[i] ✓ <wall>ms\n<text>\n---` or `[i] ✗ <wall>ms\n<error>\n---`. Use simple ASCII; no fancy colors.
+- Exit code 0 if at least one candidate succeeded, else 1.
+
+### Tests
+- Mock `OllamaClient.generate` to return a deterministic `CompletionResult`. Verify n=5 produces 5 candidates with correct indices and seeds (base_seed=100 → seeds [100,101,102,103,104]).
+- One candidate raises `OllamaError` → batch has 4 successes and 1 failure, all in correct order, no exception propagates.
+- All candidates raise → batch returns with success_count=0, failed has all 5, no exception propagates.
+- Verify `total_wall_duration_ms` is reasonable (not zero, not absurdly larger than max single-candidate time).
+- Verify candidates are ordered by index even when mock returns them out of completion order (use a side_effect that simulates varying delays so completion order ≠ submission order).
+- Verify a batch summary JSON line is appended to the log path with all expected fields.
+- Verify log directory is auto-created.
+
+### Standards
+- Python 3.10+, full type hints
+- Module-level loggers
+- Guard clauses, no deep nesting
+- Module/class/method docstrings (Google style on public)
+- No `print` outside the `__main__` smoke test
+
+### What NOT to do
+- No scoring, ranking, or "best candidate" logic — that's the controller's job, not this module's
+- No deduplication of identical outputs
+- No retry on individual candidate failure
+- No streaming
+- No async/await — use threads with the sync client we already have
+- No GUI wiring
+- Don't modify `OllamaClient` or its log format
+- Don't exceed ~200 lines in `generator.py`
+
+### Definition of done
+- `python -m aura_harness.lab "say a single number between 1 and 100" --n 5` returns 5 candidates (with default qwen3.5:latest), most likely with several different numbers
+- `.aura/batches.jsonl` has one new line after the smoke test
+- All tests pass (existing + new lab tests)
+- No TODOs in the code
+
+Be methodical. Read what you need, make the change, stop. Match existing code style. Type hints everywhere.
