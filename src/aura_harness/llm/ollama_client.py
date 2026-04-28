@@ -64,6 +64,21 @@ class OllamaClient:
         """Model name used when ``generate`` is called without an explicit model."""
         return self._default_model
 
+    @property
+    def base_url(self) -> str:
+        """Root URL of the Ollama server (no trailing slash)."""
+        return self._base_url
+
+    @property
+    def timeout_seconds(self) -> float:
+        """Per-request timeout for non-health requests, in seconds."""
+        return self._timeout
+
+    @property
+    def log_path(self) -> Path:
+        """Path to the JSONL call log."""
+        return self._log_path
+
     def generate(
         self,
         prompt: str,

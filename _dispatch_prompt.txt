@@ -1,143 +1,35 @@
-## Spec: Wire the GUI to the lab
+Cleanup. We've now hit `client._base_url` and `client._default_model` from external consumers twice. Just expose the OllamaClient construction params properly so this stops coming up.
 
-The shell window currently just echoes input. Wire it to the candidate generator so submitting a prompt kicks off an N-candidate batch on a worker thread and renders all candidates in the output area. Threading must be correct — UI must never freeze during generation. This is the vertical slice that proves the loop end-to-end through the GUI.
+Changes:
 
-### Layout
-- New: `src/aura_harness/ui/worker.py` — QThread worker that runs a batch
-- Modify: `src/aura_harness/ui/main_window.py` — add controls, wire submit to worker, render batches
-- Modify: `src/aura_harness/ui/theme.py` — add SUCCESS, ERROR, MUTED colors
-- Modify: `src/aura_harness/__main__.py` — construct OllamaClient + CandidateGenerator, pass both into MainWindow
-- New: `tests/ui/test_worker.py` — worker tests
-- Modify: `tests/ui/test_main_window.py` — update for new constructor signature
+1. In `src/aura_harness/llm/ollama_client.py`, add three new read-only properties next to the existing `default_model` property:
+   ```python
+   @property
+   def base_url(self) -> str:
+       """Root URL of the Ollama server (no trailing slash)."""
+       return self._base_url
 
-### Worker (`worker.py`)
+   @property
+   def timeout_seconds(self) -> float:
+       """Per-request timeout for non-health requests, in seconds."""
+       return self._timeout
 
-```python
-class BatchWorker(QThread):
-    batch_complete = Signal(object)   # emits CandidateBatch
-    batch_error = Signal(str)         # emits error message string
+   @property
+   def log_path(self) -> Path:
+       """Path to the JSONL call log."""
+       return self._log_path
+   ```
 
-    def __init__(
-        self,
-        generator: CandidateGenerator,
-        prompt: str,
-        n: int,
-        model: str,
-        parent: QObject | None = None,
-    ) -> None: ...
+2. In `src/aura_harness/ui/main_window.py`, replace `self._client._base_url` with `self._client.base_url` (and remove any `noqa: SLF001` on that line if present).
 
-    def run(self) -> None:
-        # call generator.generate(...), emit batch_complete on success
-        # catch any exception, log it with logger.exception, emit batch_error(str(exc))
-```
+3. Don't change behavior. No new tests required for the properties themselves — they're trivial getters. Existing tests continue to cover behavior.
 
-The generator already catches per-candidate failures internally and returns a batch with failed candidates — `batch_error` only fires on something truly catastrophic (validation errors, etc.). Both signal paths must be handled by MainWindow.
+4. Run the full test suite to confirm nothing regressed.
 
-### MainWindow changes
-
-New constructor signature:
-```python
-def __init__(self, client: OllamaClient, generator: CandidateGenerator) -> None:
-```
-
-Store both as private attributes. The `client` is for `list_models()` and `health_check()` at startup. The `generator` is what the worker uses.
-
-#### New controls
-Add a horizontal control row between the input area and the Send button (or merge into the existing button row — your call, whichever keeps the layout cleaner). The row contains:
-- `QComboBox` for model selection
-- A `"N:"` label
-- `QSpinBox` for N, range 1–10, default 3
-- Stretch
-- The existing Send button
-
-#### Model dropdown population (at startup)
-- If `client.health_check()` returns True, call `client.list_models()` and populate the combo box. Pre-select `client.default_model` if it's in the list; otherwise select index 0.
-- If health check is False or `list_models` raises: populate with just `[client.default_model]`, append a muted warning to the output area: `"⚠ Could not reach Ollama at {base_url}. Using default model only."` Use the MUTED theme color.
-
-#### Submit flow
-- On submit (button click or Ctrl+Enter), if input is empty: do nothing.
-- Read prompt, n, model from the inputs.
-- Append the user prompt to the output area (existing styled `> ...` block).
-- Disable the Send button. Leave the input editable so the user can prep the next prompt while waiting.
-- Append a muted status line: `"Generating {n} candidates with {model}..."`.
-- Construct `BatchWorker(generator, prompt, n, model, parent=self)`, connect signals, call `start()`.
-- Keep a reference to the worker on `self` so it isn't garbage collected mid-run. Single-worker model: don't allow a second submit while one is running (Send is disabled so this is enforced by UI state).
-- On `batch_complete(batch)`: render the batch (see below), re-enable Send, clear the worker reference, schedule the worker for `deleteLater()`.
-- On `batch_error(msg)`: render the error in ERROR color, re-enable Send, clear the worker reference, `deleteLater()`.
-- Clear the input only after submission is accepted (i.e., after the worker is started, not after it completes).
-
-#### Batch rendering
-After `batch_complete`, append HTML to the output area:
-```
-Batch {batch_id_short}: {success_count}/{n_requested} succeeded in {total_wall_duration_ms:.0f}ms
-```
-in MUTED color (header line), then for each candidate in index order:
-```
-[i] ✓ {wall_duration_ms:.0f}ms     ← if success, in SUCCESS color
-{candidate.text}                    ← in TEXT color, inside <pre> to preserve whitespace
-```
-or
-```
-[i] ✗ {wall_duration_ms:.0f}ms     ← if failed, in ERROR color
-{candidate.error}                   ← in ERROR color, plain text
-```
-Add a thin horizontal separator (HTML `<hr>` or just a row of dashes in MUTED color) between candidates and after the last one.
-
-HTML-escape all model text (the existing `_append_user_block` shows the pattern). Use `batch_id[:8]` for the short id.
-
-### Theme additions (`theme.py`)
-Add three new colors as module constants:
-- `SUCCESS = "#66BB6A"` (green)
-- `ERROR = "#E57373"` (red)
-- `MUTED = "#888888"` (grey)
-
-### `__main__.py` changes
-```python
-def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    app = QApplication(sys.argv)
-    client = OllamaClient()
-    generator = CandidateGenerator(client)
-    window = MainWindow(client, generator)
-    window.show()
-    return app.exec()
-```
-
-### Tests
-
-**`test_worker.py`:**
-- Mock generator, verify `batch_complete` fires with a batch when `generate` returns one.
-- Mock generator to raise, verify `batch_error` fires with the exception message and `batch_complete` does not fire.
-- Use a `QSignalSpy` or equivalent to wait for the signal. Tests should not hang — set a reasonable timeout (e.g. 5s).
-
-**`test_main_window.py` updates:**
-- Update existing tests for the new constructor signature: pass mocked client and generator.
-- Mock `client.health_check()` to return True and `client.list_models()` to return a fake list — verify the combo box is populated.
-- Mock `client.health_check()` to return False — verify the combo box has only the default model and a warning was appended.
-- Submit-disabled-during-run: verify Send button gets disabled when a submit happens (you can mock the worker's `start` to do nothing and just check button state synchronously).
-
-Don't write a test that actually runs the generator or hits Ollama. Mocks only.
-
-### Standards
-- Same as before: type hints, module loggers, guard clauses, custom exceptions only where they fit (none new needed here).
-- Use `from __future__ import annotations` consistently.
-- No `print` outside CLI smoke tests.
-
-### What NOT to do
-- No streaming token-by-token display (lab doesn't stream and we're not adding it)
-- No cancellation / Stop button
-- No "regenerate" or "pick winner" buttons (controller's job, later)
-- No syntax highlighting
-- No persistence of output history across app launches
-- No status bar, no menus
-- No model refresh button (require restart for now)
-- Don't exceed ~220 lines for `main_window.py` and ~80 lines for `worker.py`. If you're going over, you're adding things not in this spec.
-
-### Definition of done
-- `python -m aura_harness` opens the window with model dropdown populated and N spinbox at 3
-- Type a prompt, hit Send (or Ctrl+Enter): UI stays responsive, candidates appear in the output area when the batch finishes, with index + status + duration + text per candidate
-- Stopping Ollama and restarting the app: warning appears in output, dropdown shows default model only, submit shows the error path gracefully
-- All tests pass (lab, llm, ui)
-- No TODOs in the code
+Definition of done:
+- All four construction params (`base_url`, `default_model`, `timeout_seconds`, `log_path`) are exposed as read-only properties on OllamaClient
+- `main_window.py` uses `client.base_url` instead of `client._base_url`
+- All 32 tests still pass
+- No TODOs added
 
 Be methodical. Read what you need, make the change, stop. Match existing code style. Type hints everywhere.

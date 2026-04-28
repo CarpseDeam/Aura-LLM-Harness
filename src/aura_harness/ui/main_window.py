@@ -121,7 +121,7 @@ class MainWindow(QMainWindow):
             self.model_combo.addItem(default_model)
             self.model_combo.setCurrentIndex(0)
             self._append_muted_line(
-                f"⚠ Could not reach Ollama at {self._client._base_url}. "
+                f"⚠ Could not reach Ollama at {self._client.base_url}. "
                 "Using default model only."
             )
             return
