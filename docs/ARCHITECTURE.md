@@ -4,8 +4,9 @@
 
 - **`OllamaClient`**: Low-level client for interacting with the Ollama API. Manages defaults such as the `default_model`.
 - **`CandidateGenerator` (the "lab")**: Orchestrates multiple parallel calls to `OllamaClient` to generate multiple candidates for a single prompt.
-- **`MainWindow` (UI)**: The main graphical interface, providing controls for model selection, candidate count (N), and prompt submission.
-- **`BatchWorker` (UI Threading)**: A `QThread` that handles the execution of the `CandidateGenerator` off the main GUI thread, preventing UI freezes during generation.
+- **`MainWindow` (UI)**: The main graphical interface, providing controls for model selection, workspace management, candidate count (N), and prompt submission.
+- **`WorkspaceManager`**: Manages a local directory for file operations. Provides file listing, reading (for context injection), and writing (for applying candidates).
+- **`BatchWorker` (UI Threading)**: A `QThread` that handles the execution of the `CandidateGenerator` and optional `Scorer` off the main GUI thread.
 - **Scoring Layer**:
     - **`Extractor`**: Extracts code blocks from raw LLM responses using regex and AST parsing.
     - **`Validator`**: Executes extracted code in a subprocess to check for syntax, required symbols, and test pass/fail results.
@@ -13,12 +14,14 @@
 
 ## Data Flow
 
-1. User enters a prompt and selects parameters in the `MainWindow`.
-2. `MainWindow` constructs and starts a `BatchWorker`.
-3. `BatchWorker` calls `CandidateGenerator.generate()`.
-4. `CandidateGenerator` uses `OllamaClient` to fetch completions.
-5. (CLI-only for now) The scoring layer takes the `CandidateBatch`, extracts code, and validates it against a `ValidationSpec`.
-6. Results are returned to the caller (UI or CLI) for rendering or final output.
+1. User selects context files in the sidebar and enters a prompt in the `MainWindow`.
+2. `MainWindow` reads selected files via `WorkspaceManager` and prepends them to the prompt.
+3. `MainWindow` constructs and starts a `BatchWorker`, optionally passing a `ValidationSpec`.
+4. `BatchWorker` calls `CandidateGenerator.generate()`.
+5. `CandidateGenerator` uses `OllamaClient` to fetch completions.
+6. If a `ValidationSpec` was provided, `BatchWorker` calls `score_batch()` on the results.
+7. Results (raw or scored) are returned to `MainWindow` via signals and rendered as interactive widgets.
+8. User can "Apply" a candidate, writing its code back to the workspace via `WorkspaceManager`.
 
 ## CLI Interface
 

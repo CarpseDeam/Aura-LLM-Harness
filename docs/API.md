@@ -32,19 +32,34 @@ A collection of candidates from a single prompt.
 - `success_count`: Number of successful candidates.
 - `total_wall_duration_ms`: Time taken for the whole batch.
 
+## `aura_harness.workspace`
+
+### `WorkspaceManager`
+
+Manages the project workspace.
+
+- `__init__(root: Path)`: Initializes the manager with the given root path.
+- `root`: (read-only) The current workspace root path.
+- `set_root(root: Path)`: Changes the active workspace root.
+- `list_files()`: Returns a list of relative paths to files in the workspace (excluding ignored directories).
+- `read_file(rel_path: Path)`: Reads a file's content as a UTF-8 string.
+- `write_file(rel_path: Path, content: str)`: Writes content to a file in the workspace.
+
 ## `aura_harness.ui`
 
 ### `MainWindow`
 
 The main application window.
 
-- `__init__(client: OllamaClient, generator: CandidateGenerator)`: Initializes the window and wires it to the provided client and generator.
+- `__init__(client: OllamaClient, generator: CandidateGenerator, workspace: WorkspaceManager)`: Initializes the window and wires it to the provided client, generator, and workspace manager.
 
 ### BatchWorker
 
-A `QThread` for running candidate generation asynchronously.
+A `QThread` for running candidate generation and scoring asynchronously.
 
-- `batch_complete`: Signal emitted with a `CandidateBatch` object on success.
+- `__init__(generator, prompt, n, model, spec=None)`: Initializes the worker.
+- `batch_complete`: Signal emitted with a `CandidateBatch` object on success (when `spec` is `None`).
+- `scored_complete`: Signal emitted with a `ScoredBatch` object on success (when `spec` is provided).
 - `batch_error`: Signal emitted with an error message string on catastrophic failure.
 
 ## `aura_harness.scoring`
