@@ -159,6 +159,87 @@ class OllamaClient:
             raw=data,
         )
 
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        model: str | None = None,
+        temperature: float = 0.2,
+        seed: int | None = None,
+        num_predict: int | None = None,
+    ) -> CompletionResult:
+        """Run a non-streaming chat completion against ``/api/chat``.
+
+        Args:
+            messages: List of ``{"role", "content"}`` dicts. Roles are
+                ``"system"``, ``"user"``, or ``"assistant"``.
+            model: Override the client's default model.
+            temperature: Sampling temperature.
+            seed: Optional deterministic sampling seed.
+            num_predict: Max tokens to generate (Ollama's ``num_predict``).
+
+        Returns:
+            A :class:`CompletionResult` whose ``text`` is the assistant
+            message content.
+
+        Raises:
+            OllamaError: On connection failure or non-2xx response.
+        """
+        chosen_model = model or self._default_model
+        options: dict[str, Any] = {"temperature": temperature}
+        if seed is not None:
+            options["seed"] = seed
+        if num_predict is not None:
+            options["num_predict"] = num_predict
+
+        payload: dict[str, Any] = {
+            "model": chosen_model,
+            "messages": messages,
+            "stream": False,
+            "options": options,
+        }
+
+        prompt_preview = messages[-1]["content"] if messages else ""
+
+        try:
+            data = self._post_json("/api/chat", payload, timeout=self._timeout)
+        except OllamaError as exc:
+            self._log_call(
+                model=chosen_model,
+                prompt=prompt_preview,
+                response_text="",
+                prompt_eval_count=0,
+                eval_count=0,
+                total_duration_ms=0.0,
+                error=str(exc),
+            )
+            raise
+
+        message = data.get("message") or {}
+        text = str(message.get("content", ""))
+        prompt_eval_count = int(data.get("prompt_eval_count", 0))
+        eval_count = int(data.get("eval_count", 0))
+        total_duration_ms = float(data.get("total_duration", 0)) / _NS_PER_MS
+
+        self._log_call(
+            model=chosen_model,
+            prompt=prompt_preview,
+            response_text=text,
+            prompt_eval_count=prompt_eval_count,
+            eval_count=eval_count,
+            total_duration_ms=total_duration_ms,
+            error=None,
+        )
+
+        return CompletionResult(
+            text=text,
+            model=chosen_model,
+            prompt_eval_count=prompt_eval_count,
+            eval_count=eval_count,
+            total_duration_ms=total_duration_ms,
+            raw=data,
+        )
+
     def list_models(self) -> list[str]:
         """Return the names of locally installed models via ``/api/tags``."""
         data = self._get_json("/api/tags", timeout=self._timeout)

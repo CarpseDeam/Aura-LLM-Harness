@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 from aura_harness.lab import CandidateGenerator
 from aura_harness.llm import OllamaClient
+from aura_harness.planner import PlannerClient
 from aura_harness.ui.main_window import MainWindow
 from aura_harness.workspace import WorkspaceManager
 
@@ -31,8 +32,9 @@ def main() -> int:
     app = QApplication(sys.argv)
     client = OllamaClient()
     generator = CandidateGenerator(client)
+    planner = PlannerClient(client)
     workspace = _bootstrap_workspace(Path.cwd() / "workspace")
-    window = MainWindow(client, generator, workspace)
+    window = MainWindow(client, generator, workspace, planner)
     window.show()
     return app.exec()
 

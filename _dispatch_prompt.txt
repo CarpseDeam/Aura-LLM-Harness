@@ -1,71 +1,31 @@
-## Spec: Sandbox / project scaffolding
+## Spec: Chat-style planner layer
 
-The harness can work in a workspace, but every new project means manually creating files. This adds project templates: pick a template + name + parent dir, harness scaffolds it, switches workspace to the new project.
+Add a conversational planning step in front of the existing one-shot prompt → N candidates flow. The user will chat with a planner model to converge on what to build; in a future dispatch we'll wire "Commit & Generate" to spec extraction → decomposition → CandidateGenerator. This dispatch is the chat-only piece.
 
-### Scaffold module
+**File layout:**
 
-New `src/aura_harness/scaffold/`:
-- `templates.py` — template definitions as Python dicts (no external files, keep it simple)
-- `bootstrap.py` — `scaffold(template_id, name, parent_dir) -> Path` function
-- `__init__.py` — re-exports
+`src/aura_harness/planner/__init__.py` — exports for the package.
 
-Template definition shape:
-```python
-@dataclass(frozen=True)
-class Template:
-    id: str          # "blank", "python_cli"
-    label: str       # "Blank workspace", "Python CLI"
-    description: str
-    files: dict[str, str]   # relative_path -> content; both can use {name} placeholder
-```
+`src/aura_harness/planner/conversation.py` — Pure data layer. Frozen dataclasses for a single turn (role, content, timestamp) and for the whole conversation state (session id, model, system prompt, tuple of turns). Provide an immutable "appended" method for adding a turn. No I/O, no Ollama, just data.
 
-Two templates:
-1. `blank` — just `README.md` saying `# {name}\n\nAura LLM Harness workspace.\n`
-2. `python_cli` — minimal Python CLI scaffold:
-   - `pyproject.toml` with project metadata, `[project.scripts]` entry `{name} = "{name}.__main__:main"`
-   - `src/{name}/__init__.py` (empty)
-   - `src/{name}/__main__.py` — has `def main(): print("hello from {name}")` and the standard `if __name__ == "__main__": main()` block
-   - `tests/test_smoke.py` — single trivial test that imports the package
-   - `.gitignore` — standard Python (.venv, __pycache__, *.pyc, build/, dist/, *.egg-info, .pytest_cache, .coverage)
-   - `README.md`
+`src/aura_harness/planner/planner_client.py` — Stateless service that takes a ConversationState and returns the next assistant turn from Ollama's chat endpoint. Mirror the shape of `aura_harness/llm/OllamaClient`: same constructor pattern, same JSONL logging style, same conventions. Compose with OllamaClient where reasonable; otherwise add a sibling chat method on it. Streaming is desired if it can be added without significantly restructuring the existing client; if not, block-and-return is fine for v1.
 
-Expose templates via a registry list/dict so the UI can enumerate them.
+Define the planner system prompt as a module-level `Final[str]`. Frame the model as a conversational collaborator — asks clarifying questions, surfaces assumptions, helps shape a clear spec, doesn't generate code. Keep it short; we'll iterate on it.
 
-`scaffold(template_id, name, parent_dir)` behavior:
-- Validate name: only `[a-zA-Z0-9_-]+`, raise `ValueError` if not (use `re.fullmatch`). Reject empty.
-- Compute `target = parent_dir / name`. If it already exists and is non-empty, raise `FileExistsError`.
-- Create target dir.
-- For each file in the template, substitute `{name}` in both the path and the content, create parent dirs, write file.
-- Return the target path.
+`src/aura_harness/ui/planner_worker.py` — `PlannerWorker(QThread)` mirroring the existing `BatchWorker`. Emits a signal on success with the new turn, a signal on error.
 
-### UI changes
+`src/aura_harness/ui/planner_widget.py` — `PlannerWidget(QWidget)` owning the planner conversation UI: scrollable transcript with user/assistant turns rendered as distinct visual blocks (plainer than candidate cards — this is conversation, not code), a planner-specific input box with Send button and Ctrl+Enter shortcut, a model dropdown populated from `OllamaClient.list_models()`, and a "Commit & Generate" button that's enabled once there's at least one assistant turn. The widget owns its `ConversationState` internally. Exposes a `commit_requested` Qt signal carrying the committed state. Use the existing `theme` module for styling.
 
-Add a "New" button in the sidebar header row, next to the `[...]` workspace picker. Clicking it opens a `ScaffoldDialog`.
+`src/aura_harness/ui/main_window.py` — Embed `PlannerWidget` into the right column above the existing output area, in its own visually-clear region. The existing candidate-generation flow stays unchanged. Connect `commit_requested` to a stub handler that logs the committed state — real wiring to extractor → decomposer → CandidateGenerator is the next dispatch.
 
-`ScaffoldDialog` (new class in `main_window.py` is fine, or split to `ui/scaffold_dialog.py` — your call):
-- Modal QDialog with a small form layout
-- `QComboBox` populated with templates (display: `label` — `description`, data: `id`)
-- `QLineEdit` for project name (placeholder: "my_project")
-- `QLineEdit` for parent directory (default: parent of current workspace) + a `[...]` button to pick via QFileDialog.getExistingDirectory
-- Create / Cancel buttons
-- On Create: validate inputs; if invalid, show inline error label and don't close. If valid: call `scaffold(...)`, close, and have the caller switch the workspace to the new path.
+`src/aura_harness/__main__.py` — Instantiate `PlannerClient` and pass it through to `MainWindow` alongside the existing collaborators.
 
-After successful scaffold:
-- The MainWindow switches the active workspace to the new project (same code path as the [...] picker uses).
-- Sidebar refreshes.
-- Append a muted line to the output: `"Scaffolded <template_label> at <path>"`.
+**Conventions:**
 
-If scaffold raises (FileExistsError, ValueError, OSError): show a QMessageBox.warning with the message, leave the dialog open.
+Match the existing codebase: `from __future__ import annotations`, type hints throughout, frozen dataclasses for value types, `Final[...]` module-level constants for any tunables (no magic numbers in function bodies), JSONL logging via the existing logger pattern. Mirror the idioms already established in `lab/`, `scoring/`, `scaffold/`, and `ui/`. The planner model dropdown is separate from the candidate-generation model dropdown.
 
-### Standards
-Type hints, module loggers, no new third-party deps, no new tests for this dispatch (smoke-launching is enough verification).
+**Definition of done:**
 
-### Definition of done
-- "New" button in the sidebar header opens the scaffold dialog
-- Selecting "Python CLI", entering a name like `foo`, picking a parent dir, hitting Create → creates `<parent>/foo/` with the template files (pyproject, src/foo/, tests, gitignore, README) and switches the workspace to it
-- Selecting "Blank workspace" creates a directory with just a README
-- Invalid names are rejected cleanly
-- Existing-non-empty target dir is rejected cleanly
-- All existing tests still pass
+User can launch the harness, type into the planner widget, send, see the planner reply rendered in the planner transcript, and continue the conversation across multiple turns with history maintained. "Commit & Generate" is clickable and fires the signal (handler is a stub that logs). The existing candidate-generation flow still works unchanged. Business logic lives in the planner package and the planner widget; `MainWindow`'s additions are limited to instantiation and signal routing.
 
 Be methodical. Read what you need, make the change, stop. Match existing code style. Type hints everywhere.

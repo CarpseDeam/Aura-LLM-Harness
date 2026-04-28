@@ -9,6 +9,7 @@ from pytestqt.qtbot import QtBot
 
 from aura_harness.lab import CandidateGenerator
 from aura_harness.llm import OllamaClient
+from aura_harness.planner import PlannerClient
 from aura_harness.ui.main_window import INPUT_PLACEHOLDER, WINDOW_TITLE, MainWindow
 from aura_harness.workspace import WorkspaceManager
 
@@ -20,12 +21,18 @@ def client() -> MagicMock:
     mock.health_check.return_value = True
     mock.list_models.return_value = ["test-model", "other-model"]
     mock._base_url = "http://localhost:11434"
+    mock.base_url = "http://localhost:11434"
     return mock
 
 
 @pytest.fixture
 def generator() -> MagicMock:
     return MagicMock(spec=CandidateGenerator)
+
+
+@pytest.fixture
+def planner() -> MagicMock:
+    return MagicMock(spec=PlannerClient)
 
 
 @pytest.fixture
@@ -45,8 +52,9 @@ def test_window_title_and_placeholder(
     client: MagicMock,
     generator: MagicMock,
     workspace: WorkspaceManager,
+    planner: MagicMock,
 ) -> None:
-    window = MainWindow(client, generator, workspace)
+    window = MainWindow(client, generator, workspace, planner)
     qtbot.addWidget(window)
     assert window.windowTitle() == WINDOW_TITLE
     assert window.input.placeholderText() == INPUT_PLACEHOLDER
@@ -57,10 +65,11 @@ def test_submit_appends_input_to_output(
     client: MagicMock,
     generator: MagicMock,
     workspace: WorkspaceManager,
+    planner: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_worker_start(monkeypatch)
-    window = MainWindow(client, generator, workspace)
+    window = MainWindow(client, generator, workspace, planner)
     qtbot.addWidget(window)
 
     window.input.setPlainText("hello world")
@@ -75,8 +84,9 @@ def test_submit_ignores_blank_input(
     client: MagicMock,
     generator: MagicMock,
     workspace: WorkspaceManager,
+    planner: MagicMock,
 ) -> None:
-    window = MainWindow(client, generator, workspace)
+    window = MainWindow(client, generator, workspace, planner)
     qtbot.addWidget(window)
 
     window.input.setPlainText("   \n\t  ")
@@ -91,10 +101,11 @@ def test_submit_escapes_html(
     client: MagicMock,
     generator: MagicMock,
     workspace: WorkspaceManager,
+    planner: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_worker_start(monkeypatch)
-    window = MainWindow(client, generator, workspace)
+    window = MainWindow(client, generator, workspace, planner)
     qtbot.addWidget(window)
 
     window.input.setPlainText("<script>alert(1)</script>")
@@ -110,10 +121,11 @@ def test_combo_box_populated_when_healthy(
     client: MagicMock,
     generator: MagicMock,
     workspace: WorkspaceManager,
+    planner: MagicMock,
 ) -> None:
     client.list_models.return_value = ["m1", "test-model", "m2"]
 
-    window = MainWindow(client, generator, workspace)
+    window = MainWindow(client, generator, workspace, planner)
     qtbot.addWidget(window)
 
     items = [window.model_combo.itemText(i) for i in range(window.model_combo.count())]
@@ -126,10 +138,11 @@ def test_combo_box_selects_index_zero_when_default_missing(
     client: MagicMock,
     generator: MagicMock,
     workspace: WorkspaceManager,
+    planner: MagicMock,
 ) -> None:
     client.list_models.return_value = ["m1", "m2"]
 
-    window = MainWindow(client, generator, workspace)
+    window = MainWindow(client, generator, workspace, planner)
     qtbot.addWidget(window)
 
     assert window.model_combo.currentIndex() == 0
@@ -141,10 +154,11 @@ def test_combo_box_falls_back_when_unhealthy(
     client: MagicMock,
     generator: MagicMock,
     workspace: WorkspaceManager,
+    planner: MagicMock,
 ) -> None:
     client.health_check.return_value = False
 
-    window = MainWindow(client, generator, workspace)
+    window = MainWindow(client, generator, workspace, planner)
     qtbot.addWidget(window)
 
     items = [window.model_combo.itemText(i) for i in range(window.model_combo.count())]
@@ -157,10 +171,11 @@ def test_combo_box_falls_back_when_list_models_raises(
     client: MagicMock,
     generator: MagicMock,
     workspace: WorkspaceManager,
+    planner: MagicMock,
 ) -> None:
     client.list_models.side_effect = RuntimeError("nope")
 
-    window = MainWindow(client, generator, workspace)
+    window = MainWindow(client, generator, workspace, planner)
     qtbot.addWidget(window)
 
     items = [window.model_combo.itemText(i) for i in range(window.model_combo.count())]
@@ -173,8 +188,9 @@ def test_n_spin_default_and_range(
     client: MagicMock,
     generator: MagicMock,
     workspace: WorkspaceManager,
+    planner: MagicMock,
 ) -> None:
-    window = MainWindow(client, generator, workspace)
+    window = MainWindow(client, generator, workspace, planner)
     qtbot.addWidget(window)
 
     assert window.n_spin.value() == 3
@@ -187,10 +203,11 @@ def test_send_disabled_during_run(
     client: MagicMock,
     generator: MagicMock,
     workspace: WorkspaceManager,
+    planner: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_worker_start(monkeypatch)
-    window = MainWindow(client, generator, workspace)
+    window = MainWindow(client, generator, workspace, planner)
     qtbot.addWidget(window)
 
     window.input.setPlainText("hello")

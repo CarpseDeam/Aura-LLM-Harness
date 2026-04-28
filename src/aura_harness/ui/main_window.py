@@ -31,9 +31,11 @@ from PySide6.QtWidgets import (
 
 from aura_harness.lab import Candidate, CandidateBatch, CandidateGenerator
 from aura_harness.llm import OllamaClient
+from aura_harness.planner import ConversationState, PlannerClient
 from aura_harness.scaffold import get_template
 from aura_harness.scoring import ScoredBatch, ScoredCandidate, ValidationSpec
 from aura_harness.ui import theme
+from aura_harness.ui.planner_widget import PlannerWidget
 from aura_harness.ui.scaffold_dialog import ScaffoldDialog
 from aura_harness.ui.worker import BatchWorker
 from aura_harness.workspace import WorkspaceError, WorkspaceManager
@@ -63,11 +65,13 @@ class MainWindow(QMainWindow):
         client: OllamaClient,
         generator: CandidateGenerator,
         workspace: WorkspaceManager,
+        planner: PlannerClient,
     ) -> None:
         super().__init__()
         self._client = client
         self._generator = generator
         self._workspace = workspace
+        self._planner = planner
         self._worker: BatchWorker | None = None
 
         self.setWindowTitle(WINDOW_TITLE)
@@ -157,6 +161,20 @@ class MainWindow(QMainWindow):
     def _build_right_column(self, mono: QFont) -> QWidget:
         right = QWidget()
 
+        self.planner_widget: PlannerWidget = PlannerWidget(self._client, self._planner)
+        self.planner_widget.commit_requested.connect(self._on_planner_commit)
+
+        planner_frame = QFrame()
+        planner_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        planner_frame.setStyleSheet(
+            f"QFrame {{ border: 1px solid {theme.BORDER}; border-radius: {theme.RADIUS}px; }}"
+        )
+        planner_frame_layout = QVBoxLayout(planner_frame)
+        planner_frame_layout.setContentsMargins(
+            theme.PADDING_MD, theme.PADDING_MD, theme.PADDING_MD, theme.PADDING_MD
+        )
+        planner_frame_layout.addWidget(self.planner_widget)
+
         self._output_container: QWidget = QWidget()
         self._output_layout: QVBoxLayout = QVBoxLayout(self._output_container)
         self._output_layout.setContentsMargins(
@@ -196,6 +214,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(right)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(theme.PADDING_MD)
+        layout.addWidget(planner_frame, 1)
         layout.addWidget(self.output, 1)
         layout.addWidget(self.validation_group)
         layout.addWidget(self.input)
@@ -414,6 +433,21 @@ class MainWindow(QMainWindow):
         self.send_button.setEnabled(True)
         if worker is not None:
             worker.deleteLater()
+
+    # ---------------------------------------------------------------- planner
+
+    def _on_planner_commit(self, state: ConversationState) -> None:
+        """Stub handler — real wiring to extractor/decomposer is the next dispatch."""
+        logger.info(
+            "planner commit received: session=%s model=%s turns=%d",
+            state.session_id,
+            state.model,
+            len(state.turns),
+        )
+        self._append_muted_line(
+            f"Planner committed: session {state.session_id[:8]} "
+            f"({len(state.turns)} turn(s), model={state.model})."
+        )
 
     # ----------------------------------------------------------------- apply
 
