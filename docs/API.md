@@ -53,6 +53,13 @@ The main application window.
 
 - `__init__(client: OllamaClient, generator: CandidateGenerator, workspace: WorkspaceManager)`: Initializes the window and wires it to the provided client, generator, and workspace manager.
 
+### `ScaffoldDialog`
+
+A modal dialog for creating a new project from a template.
+
+- `__init__(default_parent_dir: Path, parent: QWidget | None = None)`: Initializes the dialog.
+- `created_path`: (read-only) The `Path` of the successfully created project, or `None`.
+
 ### BatchWorker
 
 A `QThread` for running candidate generation and scoring asynchronously.
@@ -98,4 +105,24 @@ A batch of scored candidates.
 - `extract_code(text: str)`: Returns `(code, method)` or `(None, None)`.
 - `validate(code: str, spec: ValidationSpec)`: Performs parsing, symbol check, and test execution.
 - `score_batch(batch: CandidateBatch, spec: ValidationSpec)`: Orchestrates extraction and validation for a whole batch.
+
+## `aura_harness.scaffold`
+
+### `Template`
+
+A project scaffold template definition.
+
+- `id`: Unique identifier.
+- `label`: Human-readable name.
+- `description`: Short summary of the template.
+- `files`: Dictionary mapping relative paths to file contents.
+
+### Functions
+
+- `scaffold(template_id: str, name: str, parent_dir: Path) -> Path`: Materializes a template on disk.
+- `get_template(template_id: str) -> Template`: Retrieves a template by its ID.
+
+### Constants
+
+- `TEMPLATES`: A tuple of all registered `Template` objects.
 

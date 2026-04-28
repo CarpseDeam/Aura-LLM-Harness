@@ -6,6 +6,7 @@
 - **`CandidateGenerator` (the "lab")**: Orchestrates multiple parallel calls to `OllamaClient` to generate multiple candidates for a single prompt.
 - **`MainWindow` (UI)**: The main graphical interface, providing controls for model selection, workspace management, candidate count (N), and prompt submission.
 - **`WorkspaceManager`**: Manages a local directory for file operations. Provides file listing, reading (for context injection), and writing (for applying candidates).
+- **`Scaffold Layer`**: Provides templates and logic to bootstrap new projects. Includes `scaffold()` function and `Template` definitions.
 - **`BatchWorker` (UI Threading)**: A `QThread` that handles the execution of the `CandidateGenerator` and optional `Scorer` off the main GUI thread.
 - **Scoring Layer**:
     - **`Extractor`**: Extracts code blocks from raw LLM responses using regex and AST parsing.
