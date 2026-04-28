@@ -2,6 +2,7 @@
 
 All notable changes to this project.
 
+- 2026-04-28: feat: implement critic + reflexion loop for the bench to improve candidate success rates.
 - 2026-04-28: docs: sharpen duplicate_finder task spec with explicit contract requirements.
 - 2026-04-28: feat: implement benchmark harness with automated verifier and session logging.
 - 2026-04-28: feat: implement chat-style planner layer for conversational spec shaping.

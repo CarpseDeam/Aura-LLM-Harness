@@ -10,10 +10,12 @@
 - **`WorkspaceManager`**: Manages a local directory for file operations. Provides file listing, reading (for context injection), and writing (for applying candidates).
 - **`Scaffold Layer`**: Provides templates and logic to bootstrap new projects. Includes `scaffold()` function and `Template` definitions.
 - **`BatchWorker` (UI Threading)**: A `QThread` that handles the execution of the `CandidateGenerator` and optional `Scorer` off the main GUI thread.
-- **`PlannerWorker` (UI Threading)**: A `QThread` that handles asynchronous calls to the `PlannerClient`.
+- **`PlannerWorker`** (UI Threading): A `QThread` that handles asynchronous calls to the `PlannerClient`.
+- **`CriticClient`**: Stateless service that reviews generated code against a specification. Produces structured critiques (violations and suggestions) using a reasoning model.
 - **Benchmark Harness**:
-    - **`Runner`**: Orchestrates generation against a task spec and invokes a standalone `verify.py` script for each candidate.
+    - **`Runner`**: Orchestrates generation against a task spec, optionally invokes the `CriticClient` for reflexion, and invokes a standalone `verify.py` script for each candidate.
     - **Session Manager**: Manages session-specific directories and persists configuration, raw batches, and aggregate summaries.
+
 - **Scoring Layer**:
     - **`Extractor`**: Extracts code blocks from raw LLM responses using regex and AST parsing.
     - **`Validator`**: Executes extracted code in a subprocess to check for syntax, required symbols, and test pass/fail results.
@@ -70,13 +72,17 @@ The benchmark harness provides a systematic way to measure model performance aga
     - Runner loads `spec.md`, `verify.py`, and `fixtures/` from `bench/tasks/<task_name>/`.
 2. **Execution Loop**:
     - For each run (batch), `CandidateGenerator` produces N candidates.
+    - **Reflexion (Optional)**: If a candidate fails verification and `--critic-rounds > 0`:
+        - `CriticClient` reviews the code against `spec.md`.
+        - A follow-up prompt with critique is sent back to `CandidateGenerator`.
+        - This repeats up to `max_rounds`.
     - Each candidate is extracted via `Extractor`.
     - Extracted code is written to a temporary file and tested by the task's `verify.py` subprocess.
 3. **Persistence**:
-    - Config, raw batches, result details, and aggregate summaries are written to a timestamped folder in `sessions/`.
+    - Config, raw batches, result details (per round), and aggregate summaries are written to a timestamped folder in `sessions/`.
 
 ### CLI Interface
 
 ```bash
-python -m aura_harness.bench --task duplicate_finder --runs 3 --n 3 --model qwen2.5-coder:7b
+python -m aura_harness.bench --task duplicate_finder --runs 3 --n 3 --model qwen2.5-coder:7b --critic-rounds 2
 ```

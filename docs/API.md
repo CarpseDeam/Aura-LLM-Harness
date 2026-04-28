@@ -75,6 +75,21 @@ Stateless service for chatting with a planner model.
 - `__init__(client: OllamaClient)`: Initializes the planner.
 - `chat(state: ConversationState) -> Turn`: Sends the conversation history to Ollama and returns the next assistant turn.
 
+## `aura_harness.critic`
+
+### `Critique`
+
+Structured review of a candidate.
+- `passed`: Boolean indicating if the candidate passes review.
+- `violations`: Tuple of strings describing contract violations.
+- `suggestions`: Tuple of strings with suggested fixes.
+
+### `CriticClient`
+
+Stateless service for reviewing code.
+- `__init__(client: OllamaClient, model: str = DEFAULT_CRITIC_MODEL)`: Initializes the critic.
+- `review(spec: str, code: str) -> Critique`: Reviews the code against the spec and returns a critique.
+
 ## `aura_harness.ui`
 
 ### `MainWindow`
@@ -176,35 +191,61 @@ Static configuration for a bench session.
 - `task`: Task name.
 - `runs`: Number of batches.
 - `n`: Candidates per batch.
-- `model`: Model name.
+- `model`: Coder model name.
 - `timeout_seconds`: Verifier timeout.
+- `critic_rounds`: Maximum reflexion rounds (0 disables critic).
+- `critic_model`: Reasoning model for the critic.
 - `harness_git_sha`: Git SHA of the harness.
 - `start_time`: ISO timestamp.
 
-### `CandidateResult`
+### `RoundResult`
 
-Outcome for a single candidate.
+Outcome for a single generation+verify attempt at a slot.
+- `round_index`: 0 for original, 1+ for reflexion.
+- `seed`: Sampling seed for this round.
 - `passed`: Boolean indicating if the verifier passed.
 - `extraction_method`: Method used for code extraction.
+- `candidate_error`: Generation error (if any).
 - `verify_stderr`: Captured stderr on failure.
-- `latency_ms`: Generation time.
+- `latency_ms`: Generation time for this round.
+- `raw_text`: Full raw model output.
+- `extracted_code`: Extracted Python source.
+- `critique`: The `Critique` that triggered this round (None for round 0).
+
+### `CandidateResult`
+
+Outcome for a single candidate slot (potentially multiple rounds).
+- `run_index`: Index of the run.
+- `candidate_index`: Position in the batch.
+- `seed`: Seed of round 0.
+- `rounds`: Tuple of `RoundResult`.
+- `passed`: (property) Whether any round passed.
+- `round_zero_passed`: (property) Whether the original candidate passed.
+- `total_latency_ms`: (property) Sum of latency across all rounds.
 
 ### `RunResult`
 
-Outcome for a full run (batch).
+Outcome for a full run (batch of slots).
 - `run_index`: Index of the run.
-- `batch_id`: ID of the candidate batch.
+- `batch_id`: ID of the round-0 candidate batch.
 - `candidates`: Tuple of `CandidateResult`.
+- `run_duration_ms`: Total time for the run (including reflexion).
 
 ### `SessionSummary`
 
 Aggregate results for a session.
-- `total_candidates`: Total count.
-- `passes`: Number of passing candidates.
-- `pass_rate`: Ratio of passes to total.
-- `mean_latency_ms`: Average generation time.
+- `task`: Task name.
+- `model`: Coder model name.
+- `critic_rounds`: Max reflexion rounds configured.
+- `critic_model`: Critic model name.
+- `total_candidates`: Total slots count.
+- `passes`: Number of slots that passed on any round.
+- `pass_rate`: Ratio of passes to total slots.
+- `one_shot_passes`: Slots that passed on round 0.
+- `one_shot_pass_rate`: Ratio of one-shot passes to total.
+- `mean_latency_ms`: Average latency per slot (summed across rounds).
 
 ### Functions
 
-- `run_bench(task: str, runs: int, n: int, model: str, ...) -> tuple[Path, SessionSummary]`: Executes a benchmark session and returns the session directory and summary.
+- `run_bench(task: str, runs: int, n: int, model: str, *, timeout_seconds: float, critic_rounds: int, critic_model: str, ...) -> tuple[Path, SessionSummary]`: Executes a benchmark session and returns the session directory and summary.
 
