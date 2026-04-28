@@ -2,6 +2,7 @@
 
 All notable changes to this project.
 
+- 2026-04-28: feat: implement benchmark harness with automated verifier and session logging.
 - 2026-04-28: feat: implement chat-style planner layer for conversational spec shaping.
 - 2026-04-28: feat: implement project scaffolding with templates (Blank, Python CLI).
 - 2026-04-28: feat: implement workspace management, file context injection, and candidate application in GUI.

@@ -168,3 +168,43 @@ A project scaffold template definition.
 
 - `TEMPLATES`: A tuple of all registered `Template` objects.
 
+## `aura_harness.bench`
+
+### `BenchConfig`
+
+Static configuration for a bench session.
+- `task`: Task name.
+- `runs`: Number of batches.
+- `n`: Candidates per batch.
+- `model`: Model name.
+- `timeout_seconds`: Verifier timeout.
+- `harness_git_sha`: Git SHA of the harness.
+- `start_time`: ISO timestamp.
+
+### `CandidateResult`
+
+Outcome for a single candidate.
+- `passed`: Boolean indicating if the verifier passed.
+- `extraction_method`: Method used for code extraction.
+- `verify_stderr`: Captured stderr on failure.
+- `latency_ms`: Generation time.
+
+### `RunResult`
+
+Outcome for a full run (batch).
+- `run_index`: Index of the run.
+- `batch_id`: ID of the candidate batch.
+- `candidates`: Tuple of `CandidateResult`.
+
+### `SessionSummary`
+
+Aggregate results for a session.
+- `total_candidates`: Total count.
+- `passes`: Number of passing candidates.
+- `pass_rate`: Ratio of passes to total.
+- `mean_latency_ms`: Average generation time.
+
+### Functions
+
+- `run_bench(task: str, runs: int, n: int, model: str, ...) -> tuple[Path, SessionSummary]`: Executes a benchmark session and returns the session directory and summary.
+
