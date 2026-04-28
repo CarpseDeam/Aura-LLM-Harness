@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import Final
 
 from aura_harness.lab.generator import CandidateGenerator
@@ -11,6 +12,7 @@ from aura_harness.scoring.models import ScoredBatch, ScoredCandidate, Validation
 from aura_harness.scoring.scorer import score_batch
 
 _ERROR_PREVIEW_CHARS: Final[int] = 200
+_EXIT_USAGE_ERROR: Final[int] = 2
 
 
 def _ensure_utf8_stdout() -> None:
@@ -34,9 +36,36 @@ def _build_parser() -> argparse.ArgumentParser:
         "--expect", action="append", default=[], metavar="SYMBOL",
         help="Top-level symbol that must be defined. May be repeated.",
     )
-    p.add_argument("--test", default=None, help="Python test code appended to each candidate.")
+    p.add_argument(
+        "--test", default=None,
+        help="Inline Python test code appended to each candidate. Best for short, "
+             "single-line tests; multiline strings get mangled by cmd.exe — use "
+             "--test-file instead.",
+    )
+    p.add_argument(
+        "--test-file", default=None, metavar="PATH",
+        help="UTF-8 Python file appended to each candidate. Recommended for "
+             "non-trivial multiline tests. Mutually exclusive with --test.",
+    )
     p.add_argument("--timeout", type=float, default=10.0, help="Test timeout in seconds.")
     return p
+
+
+def _resolve_test_code(args: argparse.Namespace) -> tuple[str | None, str | None]:
+    """Resolve test source from ``--test`` / ``--test-file``.
+
+    Returns ``(test_code, error)`` — exactly one is non-None, or both are
+    None when the user passed neither flag.
+    """
+    if args.test is not None and args.test_file is not None:
+        return (None, "--test and --test-file are mutually exclusive; pass at most one.")
+    if args.test_file is not None:
+        path = Path(args.test_file)
+        try:
+            return (path.read_text(encoding="utf-8"), None)
+        except OSError as exc:
+            return (None, f"could not read --test-file {path}: {exc}")
+    return (args.test, None)
 
 
 def _print_report(scored: ScoredBatch) -> None:
@@ -83,6 +112,10 @@ def _print_candidate_line(s: ScoredCandidate) -> None:
 def main(argv: list[str] | None = None) -> int:
     _ensure_utf8_stdout()
     args = _build_parser().parse_args(argv)
+    test_code, err = _resolve_test_code(args)
+    if err is not None:
+        print(f"error: {err}", file=sys.stderr)
+        return _EXIT_USAGE_ERROR
     client = OllamaClient(default_model=args.model) if args.model else OllamaClient()
     generator = CandidateGenerator(client)
     batch = generator.generate(
@@ -94,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     spec = ValidationSpec(
         expected_symbols=tuple(args.expect),
-        test_code=args.test,
+        test_code=test_code,
         test_timeout_seconds=args.timeout,
     )
     scored = score_batch(batch, spec)
