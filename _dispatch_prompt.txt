@@ -1,87 +1,71 @@
-## Spec: Workspace, file context, apply candidate
+## Spec: Sandbox / project scaffolding
 
-The harness can generate but can't (a) feed existing files into the prompt as context, or (b) write a chosen candidate to disk. This makes it useless as a real coding tool. This dispatch fixes both.
+The harness can work in a workspace, but every new project means manually creating files. This adds project templates: pick a template + name + parent dir, harness scaffolds it, switches workspace to the new project.
 
-### Workspace concept
+### Scaffold module
 
-New module `src/aura_harness/workspace/`:
-- `manager.py` — `WorkspaceManager` class
+New `src/aura_harness/scaffold/`:
+- `templates.py` — template definitions as Python dicts (no external files, keep it simple)
+- `bootstrap.py` — `scaffold(template_id, name, parent_dir) -> Path` function
 - `__init__.py` — re-exports
-- New `WorkspaceError` exception (in `manager.py` is fine, no need for a separate file)
 
-WorkspaceManager API:
-- `__init__(self, root: Path)` — set root, create dir if missing
-- `root` property → current root
-- `set_root(self, root: Path) -> None` — change active root, create if missing
-- `list_files(self) -> list[Path]` — recursive, returns paths relative to root. Skip: dotfiles, dotdirs, `__pycache__`, `.venv`, `.git`, `node_modules`. Sort alphabetically.
-- `read_file(self, rel_path: Path) -> str` — UTF-8 text read. Raise `WorkspaceError` if the resolved path escapes root.
-- `write_file(self, rel_path: Path, content: str) -> None` — UTF-8 text write, create parent dirs. Same escape check.
+Template definition shape:
+```python
+@dataclass(frozen=True)
+class Template:
+    id: str          # "blank", "python_cli"
+    label: str       # "Blank workspace", "Python CLI"
+    description: str
+    files: dict[str, str]   # relative_path -> content; both can use {name} placeholder
+```
 
-All path operations must resolve and verify `is_relative_to(root)` to prevent escape via `..` or absolute paths.
+Two templates:
+1. `blank` — just `README.md` saying `# {name}\n\nAura LLM Harness workspace.\n`
+2. `python_cli` — minimal Python CLI scaffold:
+   - `pyproject.toml` with project metadata, `[project.scripts]` entry `{name} = "{name}.__main__:main"`
+   - `src/{name}/__init__.py` (empty)
+   - `src/{name}/__main__.py` — has `def main(): print("hello from {name}")` and the standard `if __name__ == "__main__": main()` block
+   - `tests/test_smoke.py` — single trivial test that imports the package
+   - `.gitignore` — standard Python (.venv, __pycache__, *.pyc, build/, dist/, *.egg-info, .pytest_cache, .coverage)
+   - `README.md`
 
-Default workspace path: `<project_root>/workspace/`. Create on first launch with a simple `README.md` inside saying "Aura LLM Harness workspace" so the tree isn't empty.
+Expose templates via a registry list/dict so the UI can enumerate them.
 
-### GUI changes
+`scaffold(template_id, name, parent_dir)` behavior:
+- Validate name: only `[a-zA-Z0-9_-]+`, raise `ValueError` if not (use `re.fullmatch`). Reject empty.
+- Compute `target = parent_dir / name`. If it already exists and is non-empty, raise `FileExistsError`.
+- Create target dir.
+- For each file in the template, substitute `{name}` in both the path and the content, create parent dirs, write file.
+- Return the target path.
 
-MainWindow constructor changes from `MainWindow(client, generator)` to `MainWindow(client, generator, workspace)`. Update `__main__.py` accordingly: construct WorkspaceManager pointing at `./workspace` and pass it in.
+### UI changes
 
-Layout change: split the main window into a left sidebar (~250px wide) and a right column (everything that's currently there).
+Add a "New" button in the sidebar header row, next to the `[...]` workspace picker. Clicking it opens a `ScaffoldDialog`.
 
-Sidebar contents:
-- A small header row: `QLabel("Workspace:")` + a `QLabel` showing the current root path (truncate with elision if long) + a small `[...]` button. Clicking the button opens a directory picker; chosen directory becomes the new workspace root.
-- A `QListWidget` showing files from `workspace.list_files()`. Each item has a checkbox via `Qt.ItemFlag.ItemIsUserCheckable`. Checked items are "context files."
-- A "Refresh" button below the list that re-runs `list_files()`.
+`ScaffoldDialog` (new class in `main_window.py` is fine, or split to `ui/scaffold_dialog.py` — your call):
+- Modal QDialog with a small form layout
+- `QComboBox` populated with templates (display: `label` — `description`, data: `id`)
+- `QLineEdit` for project name (placeholder: "my_project")
+- `QLineEdit` for parent directory (default: parent of current workspace) + a `[...]` button to pick via QFileDialog.getExistingDirectory
+- Create / Cancel buttons
+- On Create: validate inputs; if invalid, show inline error label and don't close. If valid: call `scaffold(...)`, close, and have the caller switch the workspace to the new path.
 
-Right column: keep the existing layout (output, validation group, input, controls).
+After successful scaffold:
+- The MainWindow switches the active workspace to the new project (same code path as the [...] picker uses).
+- Sidebar refreshes.
+- Append a muted line to the output: `"Scaffolded <template_label> at <path>"`.
 
-### Submit flow with context
-
-When the user clicks Send, before constructing the BatchWorker:
-- Walk the file list widget, collect the relative paths of all checked items.
-- For each path: try `workspace.read_file(path)`. If the file is over 100KB, skip it and `logger.warning("skipping %s (>100KB)")`. If it raises, skip and warn.
-- If any context files were collected, build the final prompt as:
-  ```
-  # File: <relpath1>
-  <contents1>
-
-  # File: <relpath2>
-  <contents2>
-
-  ---
-
-  <user prompt>
-  ```
-  Use a single divider line of `---` between context and the user's prompt.
-- Pass that combined string as the prompt to the BatchWorker.
-- Also append a muted line to the output area noting how many context files were attached, e.g. `"Attaching 2 file(s) as context."`
-
-### Apply candidate
-
-Each rendered candidate (both unscored and scored paths) gets an "Apply" button. Place it as part of the per-candidate render block — a small `QPushButton` after the status line, before the code block. (You can either embed the button into the QTextEdit via `QTextDocument` insertion which is awkward, OR — simpler — use a different rendering approach for candidates: insert each candidate as a small `QFrame` or widget into a vertical layout in a scrollable area that replaces the QTextEdit. Pick whichever is cleaner; if going with the QTextEdit approach is genuinely too painful for buttons, switch to a `QScrollArea` with a `QVBoxLayout` of candidate widgets.)
-
-Clicking Apply on a candidate:
-- Determine "code to write": if the candidate has extracted code (scored path), use that. Otherwise use the raw candidate text. If the candidate failed entirely (model error), the Apply button should be hidden or disabled.
-- Open `QFileDialog.getSaveFileName(self, "Apply candidate", str(workspace.root), "Python files (*.py);;All files (*)")`. Default the filename to something like `candidate.py`.
-- If the user cancels: do nothing.
-- If the chosen path is outside the workspace root: show a `QMessageBox.warning` with "Files must be saved inside the workspace." and abort.
-- Otherwise, compute the relative path, call `workspace.write_file(rel, code)`, then refresh the file list.
-- Append a muted line confirming: `"Wrote candidate [i] to <relpath>"`.
-
-### Notes
-
-- The output area refactor (if you go the QScrollArea route to host buttons) means existing render methods need to produce widgets instead of HTML strings. This is fine — make a `_make_candidate_widget(...)` and `_make_scored_widget(...)` that return a styled QWidget per candidate. The header line / muted lines can still be QLabel widgets.
-- Workspace root doesn't need to persist across launches yet.
-- No syntax highlighting needed.
+If scaffold raises (FileExistsError, ValueError, OSError): show a QMessageBox.warning with the message, leave the dialog open.
 
 ### Standards
-Type hints, module loggers, no new third-party deps, no new tests for this dispatch.
+Type hints, module loggers, no new third-party deps, no new tests for this dispatch (smoke-launching is enough verification).
 
 ### Definition of done
-- App opens with sidebar showing the contents of `./workspace/` (will at least show `README.md`)
-- Clicking `[...]` lets you switch workspaces; tree refreshes
-- Checking files and submitting injects them into the prompt — verify by inspecting `.aura/calls.jsonl`, the prompt should contain `# File: ...` headers
-- Each rendered candidate has an Apply button that opens a save dialog and writes the code; tree refreshes after
-- Outside-workspace paths get rejected with a clear message
-- The existing unscored and scored paths still render correctly
+- "New" button in the sidebar header opens the scaffold dialog
+- Selecting "Python CLI", entering a name like `foo`, picking a parent dir, hitting Create → creates `<parent>/foo/` with the template files (pyproject, src/foo/, tests, gitignore, README) and switches the workspace to it
+- Selecting "Blank workspace" creates a directory with just a README
+- Invalid names are rejected cleanly
+- Existing-non-empty target dir is rejected cleanly
+- All existing tests still pass
 
 Be methodical. Read what you need, make the change, stop. Match existing code style. Type hints everywhere.

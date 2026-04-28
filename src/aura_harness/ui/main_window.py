@@ -31,8 +31,10 @@ from PySide6.QtWidgets import (
 
 from aura_harness.lab import Candidate, CandidateBatch, CandidateGenerator
 from aura_harness.llm import OllamaClient
+from aura_harness.scaffold import get_template
 from aura_harness.scoring import ScoredBatch, ScoredCandidate, ValidationSpec
 from aura_harness.ui import theme
+from aura_harness.ui.scaffold_dialog import ScaffoldDialog
 from aura_harness.ui.worker import BatchWorker
 from aura_harness.workspace import WorkspaceError, WorkspaceManager
 
@@ -127,11 +129,17 @@ class MainWindow(QMainWindow):
         pick_button.setMinimumWidth(36)
         pick_button.clicked.connect(self._on_pick_workspace)
 
+        new_button = QPushButton("New")
+        new_button.setFixedWidth(56)
+        new_button.setMinimumWidth(56)
+        new_button.clicked.connect(self._on_new_project)
+
         header_row = QHBoxLayout()
         header_row.setSpacing(theme.PADDING_SM)
         header_row.addWidget(QLabel("Workspace:"))
         header_row.addWidget(self.workspace_path_label, 1)
         header_row.addWidget(pick_button)
+        header_row.addWidget(new_button)
 
         self.file_list: QListWidget = QListWidget()
 
@@ -293,6 +301,23 @@ class MainWindow(QMainWindow):
         self._workspace.set_root(Path(chosen))
         self._refresh_workspace_view()
         self._append_muted_line(f"Workspace: {self._workspace.root}")
+
+    def _on_new_project(self) -> None:
+        default_parent = self._workspace.root.parent
+        dialog = ScaffoldDialog(default_parent, parent=self)
+        if dialog.exec() != ScaffoldDialog.DialogCode.Accepted:
+            return
+        target = dialog.created_path
+        if target is None:
+            return
+        template_id = dialog.template_combo.currentData()
+        self._workspace.set_root(target)
+        self._refresh_workspace_view()
+        try:
+            label = get_template(template_id).label if template_id else "project"
+        except KeyError:
+            label = "project"
+        self._append_muted_line(f"Scaffolded {label} at {target}")
 
     def _checked_context_files(self) -> list[Path]:
         paths: list[Path] = []
