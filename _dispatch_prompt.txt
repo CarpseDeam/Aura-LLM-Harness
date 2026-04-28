@@ -1,35 +1,209 @@
-Cleanup. We've now hit `client._base_url` and `client._default_model` from external consumers twice. Just expose the OllamaClient construction params properly so this stops coming up.
+## Spec: Extractor + Validator + Scorer — the "foundations"
 
-Changes:
+This is the moment-of-truth layer. The lab generates N candidates as raw text. This dispatch turns that text into a measurable result: did the candidate produce parseable code, with the expected symbols, that passes a test? Without it, "iteration is free" is unmeasurable. With it, we can run a real prompt and see whether N candidates picking the winner actually beats one-shot.
 
-1. In `src/aura_harness/llm/ollama_client.py`, add three new read-only properties next to the existing `default_model` property:
-   ```python
-   @property
-   def base_url(self) -> str:
-       """Root URL of the Ollama server (no trailing slash)."""
-       return self._base_url
+This dispatch is backend + CLI only. GUI integration comes next.
 
-   @property
-   def timeout_seconds(self) -> float:
-       """Per-request timeout for non-health requests, in seconds."""
-       return self._timeout
+### Layout
+- `src/aura_harness/scoring/__init__.py` — re-exports
+- `src/aura_harness/scoring/models.py` — dataclasses
+- `src/aura_harness/scoring/extractor.py` — `extract_code`
+- `src/aura_harness/scoring/validator.py` — `validate`, `ValidationSpec`, `ValidationResult`
+- `src/aura_harness/scoring/scorer.py` — `score_batch`
+- `src/aura_harness/scoring/__main__.py` — CLI smoke test
+- `tests/scoring/__init__.py`
+- `tests/scoring/test_extractor.py`
+- `tests/scoring/test_validator.py`
+- `tests/scoring/test_scorer.py`
 
-   @property
-   def log_path(self) -> Path:
-       """Path to the JSONL call log."""
-       return self._log_path
+### Data classes (`models.py`)
+
+```python
+@dataclass(frozen=True)
+class ValidationSpec:
+    """What it takes for extracted code to count as 'passing'."""
+    expected_symbols: tuple[str, ...] = ()   # top-level names that must be defined
+    test_code: str | None = None              # python source; appended to candidate; must run without raising
+    test_timeout_seconds: float = 10.0
+
+
+@dataclass(frozen=True)
+class ValidationResult:
+    passed: bool
+    parse_ok: bool
+    parse_error: str | None              # str(SyntaxError) or None
+    missing_symbols: tuple[str, ...]
+    test_ran: bool                       # True iff spec.test_code was provided AND parse_ok was True
+    test_ok: bool | None                 # None when test_ran is False
+    test_error: str | None               # stderr/exception detail on test failure (truncated to 2000 chars)
+    duration_ms: float
+
+
+@dataclass(frozen=True)
+class ScoredCandidate:
+    candidate: Candidate
+    extracted_code: str | None
+    extraction_method: str | None        # "fenced_python" | "fenced_unmarked" | "raw_parse" | None
+    validation: ValidationResult | None  # None if extraction failed or candidate failed
+
+    @property
+    def passed(self) -> bool: ...
+
+
+@dataclass(frozen=True)
+class ScoredBatch:
+    batch: CandidateBatch
+    spec: ValidationSpec
+    scored: tuple[ScoredCandidate, ...]  # parallel to batch.candidates, same order/length
+
+    @property
+    def passing(self) -> tuple[ScoredCandidate, ...]: ...
+    @property
+    def pass_rate(self) -> float: ...    # len(passing) / batch.n_requested
+    @property
+    def first_passing(self) -> ScoredCandidate | None: ...
+```
+
+### Extractor (`extractor.py`)
+
+```python
+def extract_code(text: str) -> tuple[str | None, str | None]: ...
+```
+Returns `(code, method)` or `(None, None)`. Methods: `"fenced_python"`, `"fenced_unmarked"`, `"raw_parse"`.
+
+Strategy, in order:
+1. Find all fenced blocks with `re.compile(r"```(\w+)?\s*\n(.*?)\n```", re.DOTALL)`. If any captured language tag is `python` or `py` (case-insensitive), take the **last** such block. Method = `fenced_python`. (Models often write reasoning then a final code block — last is the answer.)
+2. Else if any unmarked fenced blocks exist, take the **last** one. Method = `fenced_unmarked`.
+3. Else try `ast.parse(text.strip())`. If it succeeds, the whole stripped text is the code. Method = `raw_parse`.
+4. Else return `(None, None)`.
+
+Always strip leading/trailing whitespace from the extracted code before returning. Empty extracted content → return `(None, None)`.
+
+### Validator (`validator.py`)
+
+Module docstring must include this safety note: *test_code runs in a subprocess with the calling user's full permissions and no sandboxing. Acceptable for v1 (you're running prompts you wrote yourself); proper sandboxing is a later concern.*
+
+```python
+def validate(code: str, spec: ValidationSpec) -> ValidationResult: ...
+```
+
+Steps:
+1. **Parse** with `ast.parse(code)`. On `SyntaxError`, return immediately: `passed=False, parse_ok=False, parse_error=str(e), missing_symbols=spec.expected_symbols, test_ran=False, test_ok=None, test_error=None, duration_ms=...`. Skip the rest.
+2. **Symbol check** — walk the parsed module's top-level `body` and collect names from `ast.FunctionDef`, `ast.AsyncFunctionDef`, `ast.ClassDef`, and `ast.Assign` whose targets are simple `ast.Name` nodes. Compute `missing_symbols = tuple(s for s in spec.expected_symbols if s not in defined_names)`.
+3. **Test exec** — only if `spec.test_code` is not None.
+   - `with tempfile.TemporaryDirectory() as td:` — write `code + "\n\n" + spec.test_code` to `td/_candidate.py`.
+   - `subprocess.run([sys.executable, "_candidate.py"], capture_output=True, text=True, timeout=spec.test_timeout_seconds, cwd=td)`.
+   - Pass = `returncode == 0`. On non-zero, `test_ok=False`, `test_error=stderr[:2000]` (or stdout if stderr is empty).
+   - On `subprocess.TimeoutExpired`: `test_ok=False`, `test_error=f"timed out after {spec.test_timeout_seconds}s"`.
+   - On any other unexpected exception (e.g. file system error): `test_ok=False`, `test_error=f"validator error: {exc}"`. Don't let validator bugs crash the scorer.
+4. **passed**: `parse_ok and not missing_symbols and (test_ok if test_ran else True)`.
+
+Time the whole call with `time.perf_counter()` for `duration_ms`.
+
+### Scorer (`scorer.py`)
+
+```python
+def score_batch(batch: CandidateBatch, spec: ValidationSpec) -> ScoredBatch: ...
+```
+
+For each candidate in `batch.candidates` (preserve order):
+- Failed candidate → `ScoredCandidate(candidate, None, None, None)`.
+- Successful candidate, extraction returns None → `ScoredCandidate(candidate, None, None, None)`.
+- Otherwise → run validate, attach result.
+
+Sequential is fine for v1. Add a code comment that parallel validation is a straightforward future optimization (each validate is independent).
+
+After scoring, log one line via `logger.info`: `"Scored batch %s: %d/%d passed"` with batch.batch_id[:8].
+
+### CLI smoke test (`__main__.py`)
+
+```
+python -m aura_harness.scoring "PROMPT" \
+    --n 5 \
+    --model qwen2.5-coder:7b \
+    --expect add \
+    --test "assert add(1,2)==3
+assert add(-1,1)==0"
+```
+
+Argparse args:
+- positional: `prompt` (required)
+- `--n` (int, default 3)
+- `--model` (str, default: use client's default)
+- `--temperature` (float, default 0.5)
+- `--seed` (int, default None — random)
+- `--expect SYMBOL` (action='append', default=[])
+- `--test` (str, default None)
+- `--timeout` (float, default 10.0)
+
+Flow:
+1. Construct `OllamaClient()` + `CandidateGenerator(client)`.
+2. Generate the batch.
+3. Build `ValidationSpec(expected_symbols=tuple(args.expect), test_code=args.test, test_timeout_seconds=args.timeout)`.
+4. `scored = score_batch(batch, spec)`.
+5. Print:
    ```
+   Batch <batch_id_short>: <n> candidates from <model> in <total_wall_ms>ms
+   [i] <✓|✗> extracted=<method-or-None> parse=<ok|fail> symbols=<ok|missing:[...]> test=<ok|fail|skip> <PASS|FAIL> (<duration_ms>ms)
+       <indented test_error or parse_error if present, truncated to ~200 chars>
+   ...
+   
+   Summary: <pass_count>/<n> passed (<pct>%)
+   ```
+   For failed candidates (model error, no extracted code, etc.), keep the line short:
+   ```
+   [i] ✗ extracted=None FAIL
+       <candidate.error or "no code extracted">
+   ```
+6. Exit 0 if pass_count > 0, else 1.
 
-2. In `src/aura_harness/ui/main_window.py`, replace `self._client._base_url` with `self._client.base_url` (and remove any `noqa: SLF001` on that line if present).
+### Tests
 
-3. Don't change behavior. No new tests required for the properties themselves — they're trivial getters. Existing tests continue to cover behavior.
+**`test_extractor.py`** — covers each of these cases at minimum:
+- Single ` ```python ` fenced block → method=`fenced_python`, content matches
+- Two `python` fenced blocks → returns the **second** one
+- One `python` fenced + one unmarked fenced → returns the python one
+- Only unmarked fenced blocks → method=`fenced_unmarked`
+- No fences but `def f(): return 1` as plain text → method=`raw_parse`
+- No fences and gibberish → `(None, None)`
+- Empty string → `(None, None)`
+- Realistic deepseek-style preamble (markdown headers, prose, then ` ```python ` block, then more prose) → extracts the block, drops the prose
+- Whitespace around extracted code is stripped
 
-4. Run the full test suite to confirm nothing regressed.
+**`test_validator.py`:**
+- Valid trivial code, empty spec → `passed=True, parse_ok=True, test_ran=False`
+- Syntax error → `passed=False, parse_ok=False, parse_error` populated, no test attempted
+- `expected_symbols=("foo",)`, code defines `foo` → `missing_symbols=()`
+- `expected_symbols=("foo",)`, code does NOT define `foo` → `missing_symbols=("foo",)`, `passed=False`
+- Code defines `add`, `test_code="assert add(1,2)==3"` → `test_ran=True, test_ok=True, passed=True`
+- Code defines `add` returning wrong value, `test_code` asserts → `test_ok=False, passed=False, test_error` non-empty
+- `test_code` triggers infinite loop + `test_timeout_seconds=0.5` → `test_ok=False`, `test_error` mentions "timed out"
+- `test_code` raises `RuntimeError("nope")` → `test_ok=False`, error captured
+- Validator never raises — all errors surface in result fields
 
-Definition of done:
-- All four construction params (`base_url`, `default_model`, `timeout_seconds`, `log_path`) are exposed as read-only properties on OllamaClient
-- `main_window.py` uses `client.base_url` instead of `client._base_url`
-- All 32 tests still pass
-- No TODOs added
+**`test_scorer.py`:**
+- Build a synthetic `CandidateBatch` (you can use a real `Candidate`/`CompletionResult` constructed by hand — no need to call Ollama). Mix: one with valid code, one with syntax error, one with no extractable text, one that's a failed candidate (`error` set).
+- Run `score_batch` with a simple spec.
+- Assert `len(scored.scored) == batch.n_requested`, ordering preserved, `pass_rate` correct, `first_passing` correct.
+- All-failed batch → `pass_rate=0.0`, `first_passing is None`.
+
+### Standards
+
+- Same as the rest of the project: type hints, `from __future__ import annotations`, module-level loggers, guard clauses, Google-style docstrings on public.
+- Stdlib only — `re`, `ast`, `subprocess`, `tempfile`, `sys`, `dataclasses`, `time`, `logging`, `pathlib`, `argparse`. No new deps.
+
+### What NOT to do
+- No GUI integration in this dispatch
+- No sandboxing beyond temp dir + timeout
+- No parallel validation
+- No fuzzy/heuristic code extraction beyond the three-step stack
+- No retries on extraction or validation failure
+- Don't modify `lab/` or `llm/`
+- Don't exceed ~120 lines in any single non-test source file
+
+### Definition of done
+- `python -m aura_harness.scoring "write a python function called add(a, b) that returns their sum. just the function, no explanation." --n 5 --model qwen2.5-coder:7b --expect add --test "assert add(1,2)==3"` runs end-to-end and prints a per-candidate breakdown plus summary line. Exits 0 if at least one passed.
+- All tests pass (existing + new).
+- No TODOs.
 
 Be methodical. Read what you need, make the change, stop. Match existing code style. Type hints everywhere.
