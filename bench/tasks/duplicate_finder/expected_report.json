@@ -1,0 +1,4 @@
+[
+  ["a.txt", "c.log", "nested/b.txt"],
+  ["dup1.bin", "subdir/dup2.bin"]
+]

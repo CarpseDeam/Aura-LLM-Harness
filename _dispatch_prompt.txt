@@ -1,31 +1,29 @@
-## Spec: Chat-style planner layer
+## Spec: Benchmark harness (v0 — single task, no extractor/decomposer)
 
-Add a conversational planning step in front of the existing one-shot prompt → N candidates flow. The user will chat with a planner model to converge on what to build; in a future dispatch we'll wire "Commit & Generate" to spec extraction → decomposition → CandidateGenerator. This dispatch is the chat-only piece.
+Add an automated benchmark runner that exercises the existing CandidateGenerator against fixed task specs and logs pass/fail per candidate. Goal: establish a baseline pass rate today, before spec-extractor / decomposer / critic / reflexion are built. Subsequent dispatches will add the rest of the pipeline; this dispatch just builds the bench skeleton + the first task.
 
-**File layout:**
+**Top-level layout:**
 
-`src/aura_harness/planner/__init__.py` — exports for the package.
+`bench/tasks/duplicate_finder/spec.md` — A committed spec for "duplicate file finder" written as the artifact the planner would have produced. Walks a directory tree, hashes files by content, groups duplicates, writes a JSON report to a path given as a CLI arg. Specify: function/CLI signature the candidate must produce, input/output contract (input = directory path, output = JSON report path), what counts as a duplicate (identical content, any size > 0), behavior on unreadable files (skip with warning to stderr), report shape (list of groups, each group is a list of paths sorted lexicographically; groups themselves sorted by the first path). Keep the spec tight and unambiguous — this is what we're measuring against.
 
-`src/aura_harness/planner/conversation.py` — Pure data layer. Frozen dataclasses for a single turn (role, content, timestamp) and for the whole conversation state (session id, model, system prompt, tuple of turns). Provide an immutable "appended" method for adding a turn. No I/O, no Ollama, just data.
+`bench/tasks/duplicate_finder/verify.py` — Standalone Python script. Invoked as `python verify.py <candidate_module_path> <fixtures_dir> <output_json_path>`. Imports the candidate module, runs it against the fixture directory, compares the produced JSON report against expected output, exits 0 on pass and non-zero on fail with a diff to stderr. The verifier is the source of truth for "did the candidate work" — keep it strict, deterministic, and self-contained.
 
-`src/aura_harness/planner/planner_client.py` — Stateless service that takes a ConversationState and returns the next assistant turn from Ollama's chat endpoint. Mirror the shape of `aura_harness/llm/OllamaClient`: same constructor pattern, same JSONL logging style, same conventions. Compose with OllamaClient where reasonable; otherwise add a sibling chat method on it. Streaming is desired if it can be added without significantly restructuring the existing client; if not, block-and-return is fine for v1.
+`bench/tasks/duplicate_finder/fixtures/` — A small directory of test files: at least two duplicate groups (different content per group, multiple files per group), at least one unique file, at least one empty file (which should not count as a duplicate group). Include an `expected_report.json` alongside (sibling to `fixtures/`, not inside it) that the verifier compares against.
 
-Define the planner system prompt as a module-level `Final[str]`. Frame the model as a conversational collaborator — asks clarifying questions, surfaces assumptions, helps shape a clear spec, doesn't generate code. Keep it short; we'll iterate on it.
+`src/aura_harness/bench/__init__.py` — Exports for the package.
 
-`src/aura_harness/ui/planner_worker.py` — `PlannerWorker(QThread)` mirroring the existing `BatchWorker`. Emits a signal on success with the new turn, a signal on error.
+`src/aura_harness/bench/runner.py` — Core runner. Public entry point takes a task name, runs count, candidate count per run, and model name. For each run: invokes the existing `CandidateGenerator` with the spec.md content as the prompt, gets N candidates, for each candidate writes the extracted code to a temp file, invokes `verify.py` as a subprocess, captures pass/fail + stderr. Returns a structured result. Use `Extractor` and existing scoring infra for getting code out of candidates; do not duplicate that logic. Subprocess timeout per verify invocation: configurable via `Final[float]`, default 30s.
 
-`src/aura_harness/ui/planner_widget.py` — `PlannerWidget(QWidget)` owning the planner conversation UI: scrollable transcript with user/assistant turns rendered as distinct visual blocks (plainer than candidate cards — this is conversation, not code), a planner-specific input box with Send button and Ctrl+Enter shortcut, a model dropdown populated from `OllamaClient.list_models()`, and a "Commit & Generate" button that's enabled once there's at least one assistant turn. The widget owns its `ConversationState` internally. Exposes a `commit_requested` Qt signal carrying the committed state. Use the existing `theme` module for styling.
+`src/aura_harness/bench/session.py` — Session output management. Creates `sessions/run-<NNN>-<task>-<timestamp>/` where NNN is a zero-padded incrementing index based on existing folders. Writes `config.json` (task, runs, n, model, harness git sha via `git rev-parse HEAD`, start time), `batches/batch-<NNN>.jsonl` (one batch per run, raw candidate output + extraction result), `results.json` (per-candidate pass/fail + verify stderr, indexed by run/candidate), `summary.json` (aggregate: total candidates, passes, pass_rate, mean latency per candidate, model used). Frozen dataclasses for the structured types; serialize via `dataclasses.asdict` or equivalent.
 
-`src/aura_harness/ui/main_window.py` — Embed `PlannerWidget` into the right column above the existing output area, in its own visually-clear region. The existing candidate-generation flow stays unchanged. Connect `commit_requested` to a stub handler that logs the committed state — real wiring to extractor → decomposer → CandidateGenerator is the next dispatch.
-
-`src/aura_harness/__main__.py` — Instantiate `PlannerClient` and pass it through to `MainWindow` alongside the existing collaborators.
+`src/aura_harness/bench/__main__.py` — CLI entry. `python -m aura_harness.bench --task <name> --runs <int> --n <int> --model <name>`. Defaults: runs=3, n=3, model=qwen2.5-coder:7b. Prints session folder path on start, prints summary on completion.
 
 **Conventions:**
 
-Match the existing codebase: `from __future__ import annotations`, type hints throughout, frozen dataclasses for value types, `Final[...]` module-level constants for any tunables (no magic numbers in function bodies), JSONL logging via the existing logger pattern. Mirror the idioms already established in `lab/`, `scoring/`, `scaffold/`, and `ui/`. The planner model dropdown is separate from the candidate-generation model dropdown.
+`from __future__ import annotations` everywhere. Type hints throughout. Frozen dataclasses for structured types (`BenchConfig`, `CandidateResult`, `RunResult`, `SessionSummary`). `Final[...]` module-level constants for tunables (default timeout, default runs, default N, default model, sessions root path). Mirror existing idioms from `lab/`, `scoring/`, `scaffold/`. JSONL where streaming makes sense (batches), JSON where a single document makes sense (config, results, summary). Bench output goes under a top-level `sessions/` directory at the project root; create on first run if missing.
 
 **Definition of done:**
 
-User can launch the harness, type into the planner widget, send, see the planner reply rendered in the planner transcript, and continue the conversation across multiple turns with history maintained. "Commit & Generate" is clickable and fires the signal (handler is a stub that logs). The existing candidate-generation flow still works unchanged. Business logic lives in the planner package and the planner widget; `MainWindow`'s additions are limited to instantiation and signal routing.
+Running `python -m aura_harness.bench --task duplicate_finder --runs 3 --n 3` produces a `sessions/run-NNN-duplicate_finder-<ts>/` folder with config.json, batches/, results.json, summary.json. Each candidate has been extracted, written to a temp file, verified by subprocess, and its pass/fail recorded. Summary reports a real pass rate. The verifier's expected_report.json is correct for the fixture directory contents. Bench code is fully separate from the existing `lab/scoring/ui` packages — it depends on them, nothing depends on it.
 
 Be methodical. Read what you need, make the change, stop. Match existing code style. Type hints everywhere.
