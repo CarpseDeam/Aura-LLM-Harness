@@ -3,12 +3,24 @@ from __future__ import annotations
 
 import logging
 import sys
+from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
 from aura_harness.lab import CandidateGenerator
 from aura_harness.llm import OllamaClient
 from aura_harness.ui.main_window import MainWindow
+from aura_harness.workspace import WorkspaceManager
+
+_DEFAULT_WORKSPACE_README: str = "Aura LLM Harness workspace\n"
+
+
+def _bootstrap_workspace(root: Path) -> WorkspaceManager:
+    workspace = WorkspaceManager(root)
+    readme = workspace.root / "README.md"
+    if not readme.exists():
+        workspace.write_file(Path("README.md"), _DEFAULT_WORKSPACE_README)
+    return workspace
 
 
 def main() -> int:
@@ -19,7 +31,8 @@ def main() -> int:
     app = QApplication(sys.argv)
     client = OllamaClient()
     generator = CandidateGenerator(client)
-    window = MainWindow(client, generator)
+    workspace = _bootstrap_workspace(Path.cwd() / "workspace")
+    window = MainWindow(client, generator, workspace)
     window.show()
     return app.exec()
 
