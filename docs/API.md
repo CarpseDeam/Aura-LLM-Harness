@@ -4,6 +4,13 @@
 
 ### `OllamaClient`
 
+#### Methods
+
+- `generate(prompt: str, model: str | None = None, ...)`: Runs a non-streaming generation against `/api/generate`.
+- `chat(messages: list[dict[str, str]], model: str | None = None, ...)`: Runs a non-streaming chat completion against `/api/chat`.
+- `list_models()`: Returns names of locally installed models.
+- `health_check()`: Returns True if the server is reachable.
+
 #### Properties
 
 - `default_model`: (read-only) The model name used when `generate` is called without an explicit model.
@@ -45,13 +52,48 @@ Manages the project workspace.
 - `read_file(rel_path: Path)`: Reads a file's content as a UTF-8 string.
 - `write_file(rel_path: Path, content: str)`: Writes content to a file in the workspace.
 
+## `aura_harness.planner`
+
+### `Turn`
+
+A single message in a conversation.
+- `role`: "system", "user", or "assistant".
+- `content`: The message text.
+- `timestamp`: Creation time.
+
+### `ConversationState`
+
+The full state of a planning session.
+- `session_id`: Unique identifier.
+- `model`: The model used for this session.
+- `system_prompt`: The instructions for the planner.
+- `turns`: A tuple of `Turn` objects.
+
+### `PlannerClient`
+
+Stateless service for chatting with a planner model.
+- `__init__(client: OllamaClient)`: Initializes the planner.
+- `chat(state: ConversationState) -> Turn`: Sends the conversation history to Ollama and returns the next assistant turn.
+
 ## `aura_harness.ui`
 
 ### `MainWindow`
 
 The main application window.
 
-- `__init__(client: OllamaClient, generator: CandidateGenerator, workspace: WorkspaceManager)`: Initializes the window and wires it to the provided client, generator, and workspace manager.
+- `__init__(client: OllamaClient, generator: CandidateGenerator, workspace: WorkspaceManager, planner: PlannerClient)`: Initializes the window and wires it to its collaborators.
+
+### `PlannerWidget`
+
+Conversational interface for spec planning.
+- `commit_requested`: Signal emitted with a `ConversationState` when "Commit & Generate" is clicked.
+
+### `PlannerWorker`
+
+A `QThread` for running planner chat completions asynchronously.
+- `__init__(planner: PlannerClient, state: ConversationState)`: Initializes the worker.
+- `finished`: Signal emitted with the new `Turn` on success.
+- `error`: Signal emitted with an error message string on failure.
 
 ### `ScaffoldDialog`
 

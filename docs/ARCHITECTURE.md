@@ -2,12 +2,15 @@
 
 ## Component Overview
 
-- **`OllamaClient`**: Low-level client for interacting with the Ollama API. Manages defaults such as the `default_model`.
+- **`OllamaClient`**: Low-level client for interacting with the Ollama API. Manages defaults such as the `default_model`. Supports both completion and chat endpoints.
+- **`PlannerClient`**: Stateless service for managing conversational interactions with a planner model.
 - **`CandidateGenerator` (the "lab")**: Orchestrates multiple parallel calls to `OllamaClient` to generate multiple candidates for a single prompt.
 - **`MainWindow` (UI)**: The main graphical interface, providing controls for model selection, workspace management, candidate count (N), and prompt submission.
+- **`PlannerWidget` (UI)**: A conversational interface for interacting with the `PlannerClient` to refine a project specification before generation.
 - **`WorkspaceManager`**: Manages a local directory for file operations. Provides file listing, reading (for context injection), and writing (for applying candidates).
 - **`Scaffold Layer`**: Provides templates and logic to bootstrap new projects. Includes `scaffold()` function and `Template` definitions.
 - **`BatchWorker` (UI Threading)**: A `QThread` that handles the execution of the `CandidateGenerator` and optional `Scorer` off the main GUI thread.
+- **`PlannerWorker` (UI Threading)**: A `QThread` that handles asynchronous calls to the `PlannerClient`.
 - **Scoring Layer**:
     - **`Extractor`**: Extracts code blocks from raw LLM responses using regex and AST parsing.
     - **`Validator`**: Executes extracted code in a subprocess to check for syntax, required symbols, and test pass/fail results.
@@ -15,14 +18,20 @@
 
 ## Data Flow
 
-1. User selects context files in the sidebar and enters a prompt in the `MainWindow`.
-2. `MainWindow` reads selected files via `WorkspaceManager` and prepends them to the prompt.
-3. `MainWindow` constructs and starts a `BatchWorker`, optionally passing a `ValidationSpec`.
-4. `BatchWorker` calls `CandidateGenerator.generate()`.
-5. `CandidateGenerator` uses `OllamaClient` to fetch completions.
-6. If a `ValidationSpec` was provided, `BatchWorker` calls `score_batch()` on the results.
-7. Results (raw or scored) are returned to `MainWindow` via signals and rendered as interactive widgets.
-8. User can "Apply" a candidate, writing its code back to the workspace via `WorkspaceManager`.
+1. **Planning Phase**:
+    - User chats with a planner model via the `PlannerWidget`.
+    - `PlannerWidget` uses `PlannerWorker` to fetch assistant turns from `PlannerClient`.
+    - Once satisfied, the user clicks "Commit & Generate".
+2. **Generation Phase**:
+    - User selects context files in the sidebar and enters a prompt in the `MainWindow`.
+    - `MainWindow` reads selected files via `WorkspaceManager` and prepends them to the prompt.
+    - `MainWindow` constructs and starts a `BatchWorker`, optionally passing a `ValidationSpec`.
+    - `BatchWorker` calls `CandidateGenerator.generate()`.
+    - `CandidateGenerator` uses `OllamaClient` to fetch completions.
+3. **Validation & Application**:
+    - If a `ValidationSpec` was provided, `BatchWorker` calls `score_batch()` on the results.
+    - Results (raw or scored) are returned to `MainWindow` via signals and rendered as interactive widgets.
+    - User can "Apply" a candidate, writing its code back to the workspace via `WorkspaceManager`.
 
 ## CLI Interface
 
