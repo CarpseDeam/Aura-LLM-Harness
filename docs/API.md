@@ -40,9 +40,47 @@ The main application window.
 
 - `__init__(client: OllamaClient, generator: CandidateGenerator)`: Initializes the window and wires it to the provided client and generator.
 
-### `BatchWorker`
+### BatchWorker
 
 A `QThread` for running candidate generation asynchronously.
 
 - `batch_complete`: Signal emitted with a `CandidateBatch` object on success.
 - `batch_error`: Signal emitted with an error message string on catastrophic failure.
+
+## `aura_harness.scoring`
+
+### `ValidationSpec`
+
+Defines requirements for code validation.
+- `expected_symbols`: Tuple of names that must be defined in the code.
+- `test_code`: Optional Python source code to execute with the candidate.
+- `test_timeout_seconds`: Timeout for test execution.
+
+### `ValidationResult`
+
+Result of a single validation attempt.
+- `passed`: Boolean indicating overall success.
+- `parse_ok`: Boolean indicating if the code parsed successfully.
+- `test_ok`: Boolean or None indicating if tests passed.
+
+### `ScoredCandidate`
+
+A candidate paired with its extraction and validation results.
+- `candidate`: The original `Candidate`.
+- `extracted_code`: The code extracted from the candidate.
+- `validation`: The `ValidationResult` for the candidate.
+
+### `ScoredBatch`
+
+A batch of scored candidates.
+- `batch`: The original `CandidateBatch`.
+- `spec`: The `ValidationSpec` used for scoring.
+- `scored`: Tuple of `ScoredCandidate` objects.
+- `pass_rate`: Percentage of candidates that passed validation.
+
+### Functions
+
+- `extract_code(text: str)`: Returns `(code, method)` or `(None, None)`.
+- `validate(code: str, spec: ValidationSpec)`: Performs parsing, symbol check, and test execution.
+- `score_batch(batch: CandidateBatch, spec: ValidationSpec)`: Orchestrates extraction and validation for a whole batch.
+
