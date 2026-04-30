@@ -1,29 +1,62 @@
-## Spec: Critic + reflexion loop for the bench
+## Goal
+Add explicit model unloading to the bench runner so only one Ollama model is resident in VRAM at any given moment. We have a 16GB VRAM ceiling and the current setup spills the 7B coder + 14B critic into system RAM, dropping generation throughput by ~10x.
 
-Add a critic that reviews each candidate against the task spec and produces a structured critique, plus a reflexion loop in the bench runner that feeds critiques back to retry failed candidates. This is the core architecture move — local model + small coder + critic + retry should beat one-shot generation. Bench is the venue we measure it in.
+## Files to change
+- `src/aura_harness/llm/ollama_client.py` — add `unload_model(model_name: str)` method.
+- `src/aura_harness/bench/runner.py` — call unload at three points (described below).
 
-**File layout:**
+## New file
+- `scripts/verify_unload.py` — a small standalone script that exercises the unload path and reports whether VRAM was actually freed. Not a pytest; meant to be run once manually after this dispatch lands.
 
-`src/aura_harness/critic/__init__.py` — package exports.
+## OllamaClient.unload_model behavior
+- Sends `POST /api/generate` with body `{"model": "<name>", "prompt": "", "keep_alive": 0}`.
+- This is Ollama's documented "evict now" pattern: empty prompt + `keep_alive: 0` triggers eager unload without generation.
+- Use the existing `_post_json` helper. Use the existing timeout.
+- On success, log to the existing JSONL call log with a synthetic record (model name, `event="unload"`, no eval counts). Reuse `_log_call` if it fits cleanly; otherwise add a sibling `_log_event` method — your call.
+- On `OllamaError`, log the error but do NOT re-raise. Unload is a best-effort throughput optimization, not a correctness requirement. If Ollama is unreachable the next real call will fail loudly anyway and that's the right place for the error to surface.
+- Returns `None`.
 
-`src/aura_harness/critic/models.py` — Frozen dataclasses for the structured critique output. At minimum: a `Critique` type with a boolean indicating whether the candidate passes review, a tuple of violation strings (concrete, mechanical contract issues — "function `find_duplicates` is not at module level", "code calls `.as_posix()` on a string instead of a Path"), and a tuple of suggestion strings (terse fixes — "use `Path(p).relative_to(directory).as_posix()`"). Keep the type small and serializable.
+## Runner integration
+In `bench/runner.py`, the invariant we want: at any moment during a run, exactly one model is resident.
 
-`src/aura_harness/critic/critic_client.py` — Stateless service mirroring the shape of `PlannerClient` and `OllamaClient`. Public method takes the spec text and the candidate's raw code, calls the reasoning model via `OllamaClient.chat`, and returns a `Critique`. Default model is a `Final[str]` constant — pick `deepseek-r1:14b` since the user has it. The system prompt frames the model as a code reviewer: read the spec, read the candidate, find concrete contract violations, output structured JSON. Strongly prompt for JSON-only output and parse with a tolerant extractor (look for the first `{...}` block, fall back to error). On parse failure, return a `Critique` with `passed=False` and a single violation string explaining the parse error — never raise. Log critic calls to `.aura/critic.jsonl` mirroring the existing logging pattern.
+Three unload points, all in `run_bench`:
 
-`src/aura_harness/bench/runner.py` — Extend the existing runner with reflexion. Add a new optional parameter to `run_bench` for the maximum number of critic rounds (default 0 = current behavior, no critic). When `max_rounds > 0`: after a candidate fails verification, call the critic on the candidate's code + spec. If the critic produces violations, construct a follow-up prompt that includes the original spec, the candidate's code, the critique's violations and suggestions, and a clear instruction to produce a corrected version. Send that follow-up to the existing `CandidateGenerator` for ONE candidate (not N) and re-verify. Repeat up to `max_rounds` times. Each round's candidate is logged separately. The final pass/fail for that candidate slot is whichever round (if any) passed. Keep the original candidate's seed for reproducibility; new rounds get fresh seeds.
+1. **After each `generator.generate(...)` call finishes**, before the critic might be invoked. This applies to both the round-0 batch generation and the round-N+1 retry generation in `_resolve_candidate_slot`. Unload the coder `model`.
 
-`src/aura_harness/bench/models.py` — Extend `CandidateResult` (or add a sibling type) so each round of reflexion is captured: round index, the critique that triggered the retry, the new candidate's code, pass/fail. Existing single-shot results are round 0 with no critique.
+2. **After each `critic.review(...)` call finishes**, before the next coder generation. Unload the `critic_model`.
 
-`src/aura_harness/bench/__main__.py` — Add `--critic-rounds <int>` CLI flag (default 0). When > 0, the runner invokes the critic loop. Add `--critic-model <name>` (default `deepseek-r1:14b`) so the user can swap reasoning models without code changes.
+3. **At the end of `run_bench`**, after `write_summary` — unload whichever model was most recently used. This leaves the GPU clean for the next process.
 
-`src/aura_harness/bench/session.py` — Update batch JSONL and results.json to capture the per-round detail. Summary should report both the one-shot pass rate (round 0 only) and the final pass rate (any round passed) so the critic's contribution is legible at a glance.
+The unloads in `_resolve_candidate_slot` are the tricky ones because that function runs per-candidate and currently does generation + critique + generation tightly coupled. Two options:
+- (a) Unload inside `_resolve_candidate_slot` between each generate/critique pair. Many small unloads but invariant holds tightly.
+- (b) Restructure so that each round happens batch-wide instead of per-candidate — generate all retries together, critique all failures together. Bigger refactor but matches the "phase-structured pipeline" architecture better.
 
-**Conventions:**
+**Pick (a) for this dispatch.** (b) is a bigger architectural move that we'll do separately. The goal here is correctness of VRAM management, not pipeline restructuring.
 
-`from __future__ import annotations` everywhere. Type hints throughout. Frozen dataclasses for structured types. `Final[...]` for the critic model name, max parse attempts, default round count, and any prompt-related constants. Mirror existing idioms from `planner/`, `lab/`, `scoring/`, `bench/`. The critic is fully separate from the existing pipeline — `lab/` and `scoring/` should not import from `critic/`. The bench runner is the only consumer.
+Note that (a) means a lot of swap overhead per candidate (~10s per swap × multiple swaps × N candidates × rounds). That's acceptable for now because the alternative is silent spillover. We'll measure and optimize after this lands.
 
-**Definition of done:**
+## Verification script (`scripts/verify_unload.py`)
+Standalone script, runnable from the project root via `python scripts/verify_unload.py`. It should:
 
-`python -m aura_harness.bench --task duplicate_finder --runs 5 --n 5 --critic-rounds 2` runs the full reflexion loop. Session output captures every round of every candidate with its critique. Summary reports one-shot pass rate vs final pass rate. Existing `--critic-rounds 0` behavior is identical to today's runner. Critic JSONL logs every call.
+1. Load model A (e.g. `qwen2.5-coder:7b`) by issuing a tiny `generate("hello", num_predict=1)`.
+2. Query `GET /api/ps` to confirm model A is loaded. Print the response.
+3. Call `client.unload_model("qwen2.5-coder:7b")`.
+4. Wait briefly (~2s) for eviction to settle.
+5. Query `GET /api/ps` again. Confirm model A is no longer in the list. Print the response.
+6. Print PASS or FAIL based on whether the model disappeared from `/api/ps`.
+
+The script is the user's tool for confirming the wiring works on their actual hardware. Keep it simple, no fancy CLI args, hardcode the model name.
+
+## Definition of done
+- `OllamaClient.unload_model` exists, has a docstring, follows the same code style as `generate`/`chat`.
+- `run_bench` calls unload at the three integration points above.
+- `scripts/verify_unload.py` exists and runs to completion (PASS or FAIL output) when Ollama is up.
+- Existing tests in `tests/llm/test_ollama_client.py` and `tests/lab/test_generator.py` still pass.
+- No new pytest tests required.
+
+## Out of scope
+- The ratchet effect / gradient evaluation. That's a separate dispatch.
+- Restructuring `_resolve_candidate_slot` to batch-mode. Separate dispatch.
+- Any planner/critic prompt changes. Separate dispatch.
 
 Be methodical. Read what you need, make the change, stop. Match existing code style. Type hints everywhere.

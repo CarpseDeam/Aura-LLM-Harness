@@ -178,11 +178,16 @@ def run_bench(
     )
 
     run_results: list[RunResult] = []
+    last_model_used: str = model
     for run_index in range(runs):
         run_started = time.perf_counter()
         batch = generator.generate(spec_text, n=n, model=model)
-        candidate_results = tuple(
-            _resolve_candidate_slot(
+        client.unload_model(model)
+        last_model_used = model
+
+        slot_results: list[CandidateResult] = []
+        for cand in batch.candidates:
+            slot_result, slot_last_model = _resolve_candidate_slot(
                 run_index=run_index,
                 candidate=cand,
                 spec_text=spec_text,
@@ -193,9 +198,12 @@ def run_bench(
                 critic_rounds=critic_rounds,
                 generator=generator,
                 model=model,
+                client=client,
             )
-            for cand in batch.candidates
-        )
+            slot_results.append(slot_result)
+            last_model_used = slot_last_model
+        candidate_results = tuple(slot_results)
+
         run_duration_ms = (time.perf_counter() - run_started) * 1000.0
         run_result = RunResult(
             run_index=run_index,
@@ -215,6 +223,7 @@ def run_bench(
         runs=run_results,
     )
     write_summary(session_dir, summary)
+    client.unload_model(last_model_used)
     return session_dir, summary
 
 
@@ -230,8 +239,14 @@ def _resolve_candidate_slot(
     critic_rounds: int,
     generator: CandidateGenerator,
     model: str,
-) -> CandidateResult:
-    """Run round 0 and any reflexion rounds for a single candidate slot."""
+    client: OllamaClient,
+) -> tuple[CandidateResult, str]:
+    """Run round 0 and any reflexion rounds for a single candidate slot.
+
+    Returns the resolved :class:`CandidateResult` plus the name of the last
+    LLM model touched while resolving this slot. The caller uses that name
+    to issue a final eviction once the run finishes, keeping VRAM clean.
+    """
     round_zero = _verify_candidate_round(
         round_index=0,
         candidate=candidate,
@@ -242,13 +257,17 @@ def _resolve_candidate_slot(
     )
 
     rounds: list[RoundResult] = [round_zero]
+    last_llm_model: str = model
 
     if critic is None or critic_rounds <= 0 or round_zero.passed:
-        return CandidateResult(
-            run_index=run_index,
-            candidate_index=candidate.index,
-            seed=candidate.seed,
-            rounds=tuple(rounds),
+        return (
+            CandidateResult(
+                run_index=run_index,
+                candidate_index=candidate.index,
+                seed=candidate.seed,
+                rounds=tuple(rounds),
+            ),
+            last_llm_model,
         )
 
     last_round = round_zero
@@ -259,6 +278,8 @@ def _resolve_candidate_slot(
             break
 
         critique = critic.review(spec_text, last_round.extracted_code)
+        client.unload_model(critic.model)
+        last_llm_model = critic.model
         if critique.passed or not critique.violations:
             # Critic sees nothing actionable; further rounds would just
             # re-prompt with empty feedback. Stop and keep the slot failed.
@@ -276,6 +297,8 @@ def _resolve_candidate_slot(
             model=model,
             base_seed=new_seed,
         )
+        client.unload_model(model)
+        last_llm_model = model
         retry_candidate = retry_batch.candidates[0]
         next_round = _verify_candidate_round(
             round_index=next_round_index,
@@ -290,11 +313,14 @@ def _resolve_candidate_slot(
         if next_round.passed:
             break
 
-    return CandidateResult(
-        run_index=run_index,
-        candidate_index=candidate.index,
-        seed=candidate.seed,
-        rounds=tuple(rounds),
+    return (
+        CandidateResult(
+            run_index=run_index,
+            candidate_index=candidate.index,
+            seed=candidate.seed,
+            rounds=tuple(rounds),
+        ),
+        last_llm_model,
     )
 
 

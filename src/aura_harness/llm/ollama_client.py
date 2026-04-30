@@ -240,6 +240,35 @@ class OllamaClient:
             raw=data,
         )
 
+    def unload_model(self, model_name: str) -> None:
+        """Evict ``model_name`` from Ollama's resident set immediately.
+
+        Sends an empty-prompt completion with ``keep_alive: 0``, which is
+        Ollama's documented eager-unload pattern: no generation is performed
+        but the server drops the model from VRAM/RAM right away.
+
+        Best-effort: transport failures are logged (both via the standard
+        logger and to the JSONL call log) and swallowed. Unload is a
+        throughput optimization, not a correctness requirement; the next
+        real call will surface any genuine connectivity problems.
+
+        Args:
+            model_name: Name of the model to evict.
+        """
+        payload: dict[str, Any] = {
+            "model": model_name,
+            "prompt": "",
+            "keep_alive": 0,
+        }
+        try:
+            self._post_json("/api/generate", payload, timeout=self._timeout)
+        except OllamaError as exc:
+            logger.warning("unload_model(%s) failed: %s", model_name, exc)
+            self._log_event(event="unload", model=model_name, error=str(exc))
+            return
+
+        self._log_event(event="unload", model=model_name, error=None)
+
     def list_models(self) -> list[str]:
         """Return the names of locally installed models via ``/api/tags``."""
         data = self._get_json("/api/tags", timeout=self._timeout)
@@ -311,6 +340,20 @@ class OllamaClient:
             "prompt_eval_count": prompt_eval_count,
             "eval_count": eval_count,
             "total_duration_ms": total_duration_ms,
+            "error": error,
+        }
+        try:
+            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record) + "\n")
+        except OSError as exc:
+            logger.warning("failed to write call log to %s: %s", self._log_path, exc)
+
+    def _log_event(self, *, event: str, model: str, error: str | None) -> None:
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "model": model,
+            "event": event,
             "error": error,
         }
         try:
