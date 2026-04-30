@@ -1,0 +1,14 @@
+{
+  "task": "duplicate_finder",
+  "model": "qwen2.5-coder:7b",
+  "critic_rounds": 2,
+  "critic_model": "deepseek-r1:14b",
+  "total_candidates": 25,
+  "passes": 19,
+  "pass_rate": 0.76,
+  "one_shot_passes": 5,
+  "one_shot_pass_rate": 0.2,
+  "mean_latency_ms": 25570.230428001378,
+  "mean_tests_passed": 8.2,
+  "mean_tests_total": 9.0
+}

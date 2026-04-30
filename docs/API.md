@@ -255,5 +255,5 @@ Aggregate results for a session.
 
 ### Functions
 
-- `run_bench(task: str, runs: int, n: int, model: str, *, timeout_seconds: float, critic_rounds: int, critic_model: str, ...) -> tuple[Path, SessionSummary]`: Executes a benchmark session and returns the session directory and summary.
+- `run_bench(task: str, runs: int, n: int, model: str, *, timeout_seconds: float, critic_rounds: int, critic_model: str, verbose: bool = False, ...) -> tuple[Path, SessionSummary]`: Executes a benchmark session and returns the session directory and summary.
 

@@ -80,7 +80,10 @@ The benchmark harness provides a systematic way to measure model performance aga
     - Each candidate is extracted via `Extractor`.
     - Extracted code is written to a temporary file and tested by the task's `verify.py` subprocess.
     - **Verifier Protocol**: The `verify.py` script receives a report path as its third argument. It writes a structured JSON report (`tests_passed`, `tests_total`, `failures`) which the runner uses for the gradient signal. A fallback is provided for backward compatibility.
-3. **Persistence**:
+3. **Observability & Progress Tracking**:
+    - **Stdout Logging**: The runner provides continuous stdout feedback using a `[run X/Y cand A/B]` prefix, covering generation, verification, critic, and ratchet events.
+    - **Progress File**: A `progress.json` file is maintained in the session directory, providing machine-readable real-time stats (elapsed time, current phase, pass rate, ratchet counts) for external monitoring tools.
+4. **Persistence**:
     - Config, raw batches, result details (per round), and aggregate summaries are written to a timestamped folder in `sessions/`.
 
 ### VRAM Management

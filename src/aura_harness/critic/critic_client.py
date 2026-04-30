@@ -49,13 +49,14 @@ _DEFAULT_LOG_RELPATH: Final[Path] = Path(".aura") / "critic.jsonl"
 _PROMPT_PREVIEW_CHARS: Final[int] = 200
 _RESPONSE_PREVIEW_CHARS: Final[int] = 400
 _RAW_RESPONSE_TRUNCATE_CHARS: Final[int] = 8000
+_VERIFIER_STDERR_CAP_CHARS: Final[int] = 2000
 
 _FENCED_JSON_RE: Final[re.Pattern[str]] = re.compile(
     r"```(?:json)?\s*(\{.*?\})\s*```",
     re.DOTALL,
 )
 
-_USER_PROMPT_TEMPLATE: Final[str] = (
+_USER_PROMPT_BASE: Final[str] = (
     "## Task specification\n"
     "\n"
     "{spec}\n"
@@ -65,8 +66,18 @@ _USER_PROMPT_TEMPLATE: Final[str] = (
     "```python\n"
     "{code}\n"
     "```\n"
-    "\n"
+)
+
+_USER_PROMPT_TAIL_DEFAULT: Final[str] = (
     "Review the candidate against the specification. Emit JSON only."
+)
+
+_USER_PROMPT_TAIL_FOCUSED: Final[str] = (
+    "Focus your review on the failures listed above. The passing tests "
+    "already validate the rest of the candidate's behavior — do not "
+    "re-critique that. Identify the specific contract violations causing "
+    "the failed tests and propose the minimal changes that would flip "
+    "them to passing without regressing the passing tests. Emit JSON only."
 )
 
 
@@ -109,14 +120,45 @@ class CriticClient:
         """Path to the JSONL critic-call log."""
         return self._log_path
 
-    def review(self, spec: str, candidate_code: str) -> Critique:
+    def review(
+        self,
+        spec: str,
+        candidate_code: str,
+        *,
+        failures: tuple[str, ...] = (),
+        verifier_stderr: str | None = None,
+        tests_passed: int | None = None,
+        tests_total: int | None = None,
+    ) -> Critique:
         """Ask the reasoning model to review ``candidate_code`` against ``spec``.
+
+        Optional failure-context kwargs let the runner thread the prior
+        round's verifier signal into the prompt so the critic can focus on
+        the specific tests that failed instead of re-analyzing the whole
+        module from scratch:
+
+        - ``failures``: failed test names from the prior round.
+        - ``verifier_stderr``: stderr captured by the verifier subprocess
+            (truncated to a 2000 char cap before being included).
+        - ``tests_passed`` / ``tests_total``: the gradient signal. Both
+            must be provided for the gradient line to appear.
+
+        When none of the failure-context fields are provided the prompt
+        falls back to the legacy generic-review wording, so existing
+        callers using ``review(spec, code)`` are unaffected.
 
         Never raises. Transport failures and JSON parse failures are returned
         as a ``passed=False`` :class:`Critique` with a single violation
         explaining the cause.
         """
-        user_content = _USER_PROMPT_TEMPLATE.format(spec=spec, code=candidate_code)
+        user_content = _build_user_prompt(
+            spec=spec,
+            code=candidate_code,
+            failures=failures,
+            verifier_stderr=verifier_stderr,
+            tests_passed=tests_passed,
+            tests_total=tests_total,
+        )
         messages = [
             {"role": "system", "content": CRITIC_SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
@@ -188,6 +230,76 @@ class CriticClient:
                 fh.write(json.dumps(record) + "\n")
         except OSError as exc:
             logger.warning("failed to write critic log to %s: %s", self._log_path, exc)
+
+
+def _build_user_prompt(
+    *,
+    spec: str,
+    code: str,
+    failures: tuple[str, ...],
+    verifier_stderr: str | None,
+    tests_passed: int | None,
+    tests_total: int | None,
+) -> str:
+    """Compose the user message for the critic.
+
+    When any failure-context field is populated, append a "Failure context"
+    section listing the gradient, failed test names, and (capped) verifier
+    stderr, plus a focus directive in place of the generic review wording.
+    Otherwise, return the legacy prompt unchanged.
+    """
+    base = _USER_PROMPT_BASE.format(spec=spec, code=code)
+    failure_section = _build_failure_context_section(
+        failures=failures,
+        verifier_stderr=verifier_stderr,
+        tests_passed=tests_passed,
+        tests_total=tests_total,
+    )
+    if not failure_section:
+        return f"{base}\n{_USER_PROMPT_TAIL_DEFAULT}"
+    return f"{base}\n{failure_section}\n{_USER_PROMPT_TAIL_FOCUSED}"
+
+
+def _build_failure_context_section(
+    *,
+    failures: tuple[str, ...],
+    verifier_stderr: str | None,
+    tests_passed: int | None,
+    tests_total: int | None,
+) -> str:
+    """Render the optional "Failure context" section, or ``""`` if empty."""
+    lines: list[str] = []
+    if tests_passed is not None and tests_total is not None:
+        lines.append(
+            f"- Gradient: passed {tests_passed} of {tests_total} named tests."
+        )
+    if failures:
+        lines.append("- Failed tests:")
+        lines.extend(f"  - {name}" for name in failures)
+    stderr_block = _format_verifier_stderr(verifier_stderr)
+    if stderr_block is not None:
+        lines.append("- Verifier stderr:")
+        lines.append(stderr_block)
+    if not lines:
+        return ""
+    body = "\n".join(lines)
+    return f"## Failure context\n\nThe verifier reported:\n\n{body}\n"
+
+
+def _format_verifier_stderr(stderr: str | None) -> str | None:
+    """Wrap stderr in a fenced block, truncating to the 2000 char cap."""
+    if stderr is None:
+        return None
+    text = stderr.strip()
+    if not text:
+        return None
+    if len(text) > _VERIFIER_STDERR_CAP_CHARS:
+        omitted = len(text) - _VERIFIER_STDERR_CAP_CHARS
+        text = (
+            text[:_VERIFIER_STDERR_CAP_CHARS]
+            + f"\n... (truncated, {omitted} more chars)"
+        )
+    return f"```\n{text}\n```"
 
 
 def _parse_response(text: str) -> Critique:

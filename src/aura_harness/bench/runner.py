@@ -543,7 +543,14 @@ def _resolve_candidate_slot(
         if prior_critique is None:
             tracker.start_critic(next_round_index)
             critic_started = time.perf_counter()
-            critique = critic.review(spec_text, prior_best.extracted_code)
+            critique = critic.review(
+                spec_text,
+                prior_best.extracted_code,
+                failures=prior_best.failures,
+                verifier_stderr=prior_best.verify_stderr,
+                tests_passed=prior_best.tests_passed,
+                tests_total=prior_best.tests_total,
+            )
             tracker.unload(client, critic.model)
             last_llm_model = critic.model
             tracker.critic_done(
