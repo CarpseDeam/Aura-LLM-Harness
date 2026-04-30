@@ -204,7 +204,11 @@ Static configuration for a bench session.
 Outcome for a single generation+verify attempt at a slot.
 - `round_index`: 0 for original, 1+ for reflexion.
 - `seed`: Sampling seed for this round.
-- `passed`: Boolean indicating if the verifier passed.
+- `passed`: Boolean indicating if every assertion passed.
+- `tests_passed`: Number of assertions that passed.
+- `tests_total`: Total number of assertions evaluated.
+- `failures`: Tuple of names of failing assertions.
+- `ratchet_accepted`: Boolean indicating if this round improved on prior-best.
 - `extraction_method`: Method used for code extraction.
 - `candidate_error`: Generation error (if any).
 - `verify_stderr`: Captured stderr on failure.
@@ -220,7 +224,8 @@ Outcome for a single candidate slot (potentially multiple rounds).
 - `candidate_index`: Position in the batch.
 - `seed`: Seed of round 0.
 - `rounds`: Tuple of `RoundResult`.
-- `passed`: (property) Whether any round passed.
+- `prior_best`: (property) The round kept under the ratchet (highest `tests_passed`).
+- `passed`: (property) Whether the `prior_best` round passed.
 - `round_zero_passed`: (property) Whether the original candidate passed.
 - `total_latency_ms`: (property) Sum of latency across all rounds.
 
@@ -240,11 +245,13 @@ Aggregate results for a session.
 - `critic_rounds`: Max reflexion rounds configured.
 - `critic_model`: Critic model name.
 - `total_candidates`: Total slots count.
-- `passes`: Number of slots that passed on any round.
+- `passes`: Number of slots that passed on their prior-best round.
 - `pass_rate`: Ratio of passes to total slots.
 - `one_shot_passes`: Slots that passed on round 0.
 - `one_shot_pass_rate`: Ratio of one-shot passes to total.
 - `mean_latency_ms`: Average latency per slot (summed across rounds).
+- `mean_tests_passed`: Mean number of passed tests across all prior-best rounds.
+- `mean_tests_total`: Mean total number of tests across all prior-best rounds.
 
 ### Functions
 

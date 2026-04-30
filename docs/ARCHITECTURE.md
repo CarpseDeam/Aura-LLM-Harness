@@ -75,9 +75,11 @@ The benchmark harness provides a systematic way to measure model performance aga
     - **Reflexion (Optional)**: If a candidate fails verification and `--critic-rounds > 0`:
         - `CriticClient` reviews the code against `spec.md`.
         - A follow-up prompt with critique is sent back to `CandidateGenerator`.
+        - **One-Way Ratchet**: The runner tracks the "prior-best" round based on a gradient signal (pass-count). A retry only replaces the prior-best if it strictly improves the number of passed tests.
         - This repeats up to `max_rounds`.
     - Each candidate is extracted via `Extractor`.
     - Extracted code is written to a temporary file and tested by the task's `verify.py` subprocess.
+    - **Verifier Protocol**: The `verify.py` script receives a report path as its third argument. It writes a structured JSON report (`tests_passed`, `tests_total`, `failures`) which the runner uses for the gradient signal. A fallback is provided for backward compatibility.
 3. **Persistence**:
     - Config, raw batches, result details (per round), and aggregate summaries are written to a timestamped folder in `sessions/`.
 

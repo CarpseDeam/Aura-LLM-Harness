@@ -2,6 +2,7 @@
 
 All notable changes to this project.
 
+- 2026-04-30: feat: implement gradient evaluation and one-way ratchet logic in Benchmark Runner to ensure monotonic improvement during reflexion.
 - 2026-04-30: feat: implement explicit model unloading in OllamaClient and Bench Runner to optimize VRAM usage.
 - 2026-04-28: feat: implement critic + reflexion loop for the bench to improve candidate success rates.
 - 2026-04-28: docs: sharpen duplicate_finder task spec with explicit contract requirements.
