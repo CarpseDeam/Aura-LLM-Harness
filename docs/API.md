@@ -8,6 +8,7 @@
 
 - `generate(prompt: str, model: str | None = None, ...)`: Runs a non-streaming generation against `/api/generate`.
 - `chat(messages: list[dict[str, str]], model: str | None = None, ...)`: Runs a non-streaming chat completion against `/api/chat`.
+- `unload_model(model_name: str)`: Evicts `model_name` from Ollama's resident set immediately.
 - `list_models()`: Returns names of locally installed models.
 - `health_check()`: Returns True if the server is reachable.
 

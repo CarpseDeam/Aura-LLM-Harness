@@ -2,7 +2,7 @@
 
 ## Component Overview
 
-- **`OllamaClient`**: Low-level client for interacting with the Ollama API. Manages defaults such as the `default_model`. Supports both completion and chat endpoints.
+- **`OllamaClient`**: Low-level client for interacting with the Ollama API. Manages defaults such as the `default_model`. Supports both completion and chat endpoints, as well as explicit model unloading to manage VRAM.
 - **`PlannerClient`**: Stateless service for managing conversational interactions with a planner model.
 - **`CandidateGenerator` (the "lab")**: Orchestrates multiple parallel calls to `OllamaClient` to generate multiple candidates for a single prompt.
 - **`MainWindow` (UI)**: The main graphical interface, providing controls for model selection, workspace management, candidate count (N), and prompt submission.
@@ -80,6 +80,16 @@ The benchmark harness provides a systematic way to measure model performance aga
     - Extracted code is written to a temporary file and tested by the task's `verify.py` subprocess.
 3. **Persistence**:
     - Config, raw batches, result details (per round), and aggregate summaries are written to a timestamped folder in `sessions/`.
+
+### VRAM Management
+
+To prevent VRAM spillover and maintain high generation throughput, the Benchmark Runner enforces a "one model resident" invariant. It explicitly unloads models from Ollama's memory after each phase:
+- After batch generation (unloads the coder model).
+- After each reflexion review (unloads the critic model).
+- After reflexion retries (unloads the coder model).
+- At the end of the session (cleans the GPU).
+
+This is achieved via `OllamaClient.unload_model()`, which utilizes Ollama's eager eviction pattern (empty prompt + `keep_alive: 0`).
 
 ### CLI Interface
 
