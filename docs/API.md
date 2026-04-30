@@ -89,7 +89,7 @@ Structured review of a candidate.
 
 Stateless service for reviewing code.
 - `__init__(client: OllamaClient, model: str = DEFAULT_CRITIC_MODEL)`: Initializes the critic.
-- `review(spec: str, code: str) -> Critique`: Reviews the code against the spec and returns a critique.
+- `review(spec: str, code: str, *, failures: tuple[str, ...] = (), verifier_stderr: str | None = None, tests_passed: int | None = None, tests_total: int | None = None) -> Critique`: Reviews the code against the spec, optionally using failure context (failed tests, verifier stderr, and gradient signal) to provide focused feedback. Returns a critique.
 
 ## `aura_harness.ui`
 

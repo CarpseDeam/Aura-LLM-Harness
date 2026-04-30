@@ -73,7 +73,7 @@ The benchmark harness provides a systematic way to measure model performance aga
 2. **Execution Loop**:
     - For each run (batch), `CandidateGenerator` produces N candidates.
     - **Reflexion (Optional)**: If a candidate fails verification and `--critic-rounds > 0`:
-        - `CriticClient` reviews the code against `spec.md`.
+        - `CriticClient` reviews the code against `spec.md`, utilizing failure context (failed tests, verifier stderr, and gradient signal) from the prior round to provide focused feedback.
         - A follow-up prompt with critique is sent back to `CandidateGenerator`.
         - **One-Way Ratchet**: The runner tracks the "prior-best" round based on a gradient signal (pass-count). A retry only replaces the prior-best if it strictly improves the number of passed tests.
         - This repeats up to `max_rounds`.
