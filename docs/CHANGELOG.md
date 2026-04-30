@@ -2,6 +2,7 @@
 
 All notable changes to this project.
 
+- 2026-04-30: refactor: restructure Benchmark Runner to use phase-based orchestration, reducing model swap overhead and enabling parallel critic calls.
 - 2026-04-30: feat: thread failure context (gradient, failed tests, stderr) into CriticClient for focused reflexion reviews.
 - 2026-04-30: feat: add stdout progress logging and real-time `progress.json` updates to the Benchmark Runner.
 - 2026-04-30: feat: implement gradient evaluation and one-way ratchet logic in Benchmark Runner to ensure monotonic improvement during reflexion.

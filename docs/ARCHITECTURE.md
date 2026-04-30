@@ -71,27 +71,28 @@ The benchmark harness provides a systematic way to measure model performance aga
 1. **Task Loading**:
     - Runner loads `spec.md`, `verify.py`, and `fixtures/` from `bench/tasks/<task_name>/`.
 2. **Execution Loop**:
-    - For each run (batch), `CandidateGenerator` produces N candidates.
-    - **Reflexion (Optional)**: If a candidate fails verification and `--critic-rounds > 0`:
+    - The runner uses a phase-based pipeline to resolve each run (batch) of candidates, minimizing model swap overhead:
+        - **Phase: Round-0 Generation**: Coder model loaded. Generates N candidates in parallel.
+        - **Phase: Critic Round K**: Critic model loaded. Reviews all candidates that failed the prior round in parallel.
+        - **Phase: Retry Round K**: Coder model loaded. Generates retries for all candidates with actionable critiques in parallel.
+    - **Reflexion & Ratchet**:
         - `CriticClient` reviews the code against `spec.md`, utilizing failure context (failed tests, verifier stderr, and gradient signal) from the prior round to provide focused feedback.
-        - A follow-up prompt with critique is sent back to `CandidateGenerator`.
         - **One-Way Ratchet**: The runner tracks the "prior-best" round based on a gradient signal (pass-count). A retry only replaces the prior-best if it strictly improves the number of passed tests.
-        - This repeats up to `max_rounds`.
     - Each candidate is extracted via `Extractor`.
     - Extracted code is written to a temporary file and tested by the task's `verify.py` subprocess.
     - **Verifier Protocol**: The `verify.py` script receives a report path as its third argument. It writes a structured JSON report (`tests_passed`, `tests_total`, `failures`) which the runner uses for the gradient signal. A fallback is provided for backward compatibility.
 3. **Observability & Progress Tracking**:
-    - **Stdout Logging**: The runner provides continuous stdout feedback using a `[run X/Y cand A/B]` prefix, covering generation, verification, critic, and ratchet events.
+    - **Stdout Logging**: The runner provides continuous stdout feedback using a `[run X/Y phase: name]` and `[run X/Y cand A/B]` prefixes, covering phase boundaries, candidate completions, and ratchet events.
     - **Progress File**: A `progress.json` file is maintained in the session directory, providing machine-readable real-time stats (elapsed time, current phase, pass rate, ratchet counts) for external monitoring tools.
 4. **Persistence**:
     - Config, raw batches, result details (per round), and aggregate summaries are written to a timestamped folder in `sessions/`.
 
 ### VRAM Management
 
-To prevent VRAM spillover and maintain high generation throughput, the Benchmark Runner enforces a "one model resident" invariant. It explicitly unloads models from Ollama's memory after each phase:
-- After batch generation (unloads the coder model).
-- After each reflexion review (unloads the critic model).
-- After reflexion retries (unloads the coder model).
+To prevent VRAM spillover and maintain high generation throughput, the Benchmark Runner enforces a "one model resident" invariant. It explicitly unloads models from Ollama's memory at each phase boundary:
+- After the **Round-0 Generation** phase (unloads the coder model).
+- After each **Critic Round** phase (unloads the critic model).
+- After each **Retry Round** phase (unloads the coder model).
 - At the end of the session (cleans the GPU).
 
 This is achieved via `OllamaClient.unload_model()`, which utilizes Ollama's eager eviction pattern (empty prompt + `keep_alive: 0`).
