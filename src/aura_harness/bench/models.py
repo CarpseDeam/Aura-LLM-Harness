@@ -60,7 +60,17 @@ class RoundResult:
         round_index: ``0`` for the original generation, ``1+`` for
             reflexion rounds.
         seed: Sampling seed used for this round.
-        passed: Whether the verifier subprocess exited 0 on this round.
+        passed: Whether the verifier passed every assertion. Equivalent to
+            ``tests_passed == tests_total and tests_total > 0``.
+        tests_passed: Number of named assertions the verifier reports as
+            passing for this round.
+        tests_total: Total number of named assertions the verifier
+            evaluated for this round.
+        failures: Names of the assertions that failed for this round.
+        ratchet_accepted: ``True`` for round 0 and for any retry that
+            strictly improved on the prior-best ``tests_passed``. Rejected
+            retries are kept in the rounds list with this set to ``False``
+            and do not influence the next reflexion prompt.
         extraction_method: Method used by the extractor, or ``None`` if no
             code was extracted (or generation itself failed).
         candidate_error: Generation error message, or ``None`` on success.
@@ -79,6 +89,10 @@ class RoundResult:
     round_index: int
     seed: int
     passed: bool
+    tests_passed: int
+    tests_total: int
+    failures: tuple[str, ...]
+    ratchet_accepted: bool
     extraction_method: str | None
     candidate_error: str | None
     verify_stderr: str | None
@@ -111,9 +125,21 @@ class CandidateResult:
     rounds: tuple[RoundResult, ...]
 
     @property
+    def prior_best(self) -> RoundResult | None:
+        """The kept round under the ratchet (highest ``tests_passed``).
+
+        This is the most-recent round with ``ratchet_accepted=True``: round 0
+        plus any retry that strictly improved on the prior-best at the time
+        it was generated. Returns ``None`` only if the slot has no rounds.
+        """
+        accepted = [r for r in self.rounds if r.ratchet_accepted]
+        return accepted[-1] if accepted else (self.rounds[-1] if self.rounds else None)
+
+    @property
     def passed(self) -> bool:
-        """Whether any round at this slot passed the verifier."""
-        return any(r.passed for r in self.rounds)
+        """Whether the prior-best round at this slot passed the verifier."""
+        best = self.prior_best
+        return best is not None and best.passed
 
     @property
     def round_zero_passed(self) -> bool:
@@ -164,6 +190,12 @@ class SessionSummary:
             equivalent to ``pass_rate`` when ``critic_rounds == 0``.
         mean_latency_ms: Mean per-slot generation latency, summed across
             all rounds at the slot, in ms.
+        mean_tests_passed: Mean ``tests_passed`` across the kept (prior-best)
+            final round of each candidate slot. ``0.0`` if there are no
+            candidates.
+        mean_tests_total: Mean ``tests_total`` across the kept (prior-best)
+            final round of each candidate slot. ``0.0`` if there are no
+            candidates.
     """
 
     task: str
@@ -176,3 +208,5 @@ class SessionSummary:
     one_shot_passes: int
     one_shot_pass_rate: float
     mean_latency_ms: float
+    mean_tests_passed: float
+    mean_tests_total: float

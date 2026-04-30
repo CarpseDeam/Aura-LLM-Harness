@@ -17,6 +17,7 @@ rather than duplicating extraction logic.
 """
 from __future__ import annotations
 
+import json
 import logging
 import random
 import subprocess
@@ -24,6 +25,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
@@ -243,6 +245,11 @@ def _resolve_candidate_slot(
 ) -> tuple[CandidateResult, str]:
     """Run round 0 and any reflexion rounds for a single candidate slot.
 
+    Reflexion rounds use a one-way ratchet on ``tests_passed``: a retry
+    only replaces the prior-best (and feeds the next prompt) if it
+    strictly improves the pass-count. Rejected retries are still kept in
+    the rounds list with ``ratchet_accepted=False`` for inspection.
+
     Returns the resolved :class:`CandidateResult` plus the name of the last
     LLM model touched while resolving this slot. The caller uses that name
     to issue a final eviction once the run finishes, keeping VRAM clean.
@@ -254,10 +261,13 @@ def _resolve_candidate_slot(
         fixtures_dir=fixtures_dir,
         timeout_seconds=timeout_seconds,
         critique=None,
+        ratchet_accepted=True,
     )
 
     rounds: list[RoundResult] = [round_zero]
     last_llm_model: str = model
+    prior_best = round_zero
+    prior_critique: Critique | None = None
 
     if critic is None or critic_rounds <= 0 or round_zero.passed:
         return (
@@ -270,25 +280,26 @@ def _resolve_candidate_slot(
             last_llm_model,
         )
 
-    last_round = round_zero
     for next_round_index in range(1, critic_rounds + 1):
-        if last_round.extracted_code is None:
+        if prior_best.extracted_code is None:
             # Nothing for the critic to chew on (extraction failed or
             # generation itself failed); reflexion can't recover from this.
             break
 
-        critique = critic.review(spec_text, last_round.extracted_code)
-        client.unload_model(critic.model)
-        last_llm_model = critic.model
-        if critique.passed or not critique.violations:
-            # Critic sees nothing actionable; further rounds would just
-            # re-prompt with empty feedback. Stop and keep the slot failed.
-            break
+        if prior_critique is None:
+            critique = critic.review(spec_text, prior_best.extracted_code)
+            client.unload_model(critic.model)
+            last_llm_model = critic.model
+            if critique.passed or not critique.violations:
+                # Critic sees nothing actionable; further rounds would just
+                # re-prompt with empty feedback. Stop and keep the slot failed.
+                break
+            prior_critique = critique
 
         follow_up_prompt = _build_reflexion_prompt(
             spec=spec_text,
-            previous_code=last_round.extracted_code,
-            critique=critique,
+            previous_code=prior_best.extracted_code,
+            critique=prior_critique,
         )
         new_seed = random.randint(0, _REFLEXION_SEED_MAX)
         retry_batch = generator.generate(
@@ -306,11 +317,18 @@ def _resolve_candidate_slot(
             verify_path=verify_path,
             fixtures_dir=fixtures_dir,
             timeout_seconds=timeout_seconds,
-            critique=critique,
+            critique=prior_critique,
+            ratchet_accepted=False,
         )
+        accepted = next_round.tests_passed > prior_best.tests_passed
+        if accepted:
+            next_round = _with_ratchet(next_round, accepted=True)
+            prior_best = next_round
+            # The next round needs a fresh critique against the new
+            # prior-best, since the prior critique targeted older code.
+            prior_critique = None
         rounds.append(next_round)
-        last_round = next_round
-        if next_round.passed:
+        if prior_best.passed:
             break
 
     return (
@@ -324,6 +342,26 @@ def _resolve_candidate_slot(
     )
 
 
+def _with_ratchet(round_result: RoundResult, *, accepted: bool) -> RoundResult:
+    """Return a copy of ``round_result`` with ``ratchet_accepted`` flipped."""
+    return RoundResult(
+        round_index=round_result.round_index,
+        seed=round_result.seed,
+        passed=round_result.passed,
+        tests_passed=round_result.tests_passed,
+        tests_total=round_result.tests_total,
+        failures=round_result.failures,
+        ratchet_accepted=accepted,
+        extraction_method=round_result.extraction_method,
+        candidate_error=round_result.candidate_error,
+        verify_stderr=round_result.verify_stderr,
+        latency_ms=round_result.latency_ms,
+        raw_text=round_result.raw_text,
+        extracted_code=round_result.extracted_code,
+        critique=round_result.critique,
+    )
+
+
 def _verify_candidate_round(
     *,
     round_index: int,
@@ -332,6 +370,7 @@ def _verify_candidate_round(
     fixtures_dir: Path,
     timeout_seconds: float,
     critique: Critique | None,
+    ratchet_accepted: bool,
 ) -> RoundResult:
     """Extract code from a candidate and run the verifier subprocess."""
     if not candidate.is_success:
@@ -339,6 +378,10 @@ def _verify_candidate_round(
             round_index=round_index,
             seed=candidate.seed,
             passed=False,
+            tests_passed=0,
+            tests_total=1,
+            failures=("generation failed",),
+            ratchet_accepted=ratchet_accepted,
             extraction_method=None,
             candidate_error=candidate.error,
             verify_stderr=None,
@@ -355,6 +398,10 @@ def _verify_candidate_round(
             round_index=round_index,
             seed=candidate.seed,
             passed=False,
+            tests_passed=0,
+            tests_total=1,
+            failures=("extraction failed",),
+            ratchet_accepted=ratchet_accepted,
             extraction_method=None,
             candidate_error=None,
             verify_stderr="extraction failed: no code block found",
@@ -387,6 +434,10 @@ def _verify_candidate_round(
                 round_index=round_index,
                 seed=candidate.seed,
                 passed=False,
+                tests_passed=0,
+                tests_total=1,
+                failures=(f"verify timed out after {timeout_seconds}s",),
+                ratchet_accepted=ratchet_accepted,
                 extraction_method=method,
                 candidate_error=None,
                 verify_stderr=f"verify timed out after {timeout_seconds}s",
@@ -395,13 +446,18 @@ def _verify_candidate_round(
                 extracted_code=code,
                 critique=critique,
             )
+        gradient = _read_gradient_report(report_path, returncode=proc.returncode)
 
-    passed = proc.returncode == 0
+    passed = gradient.passed
     stderr_preview = None if passed else (proc.stderr or "")[:_STDERR_PREVIEW_CHARS]
     return RoundResult(
         round_index=round_index,
         seed=candidate.seed,
         passed=passed,
+        tests_passed=gradient.tests_passed,
+        tests_total=gradient.tests_total,
+        failures=gradient.failures,
+        ratchet_accepted=ratchet_accepted,
         extraction_method=method,
         candidate_error=None,
         verify_stderr=stderr_preview,
@@ -409,6 +465,64 @@ def _verify_candidate_round(
         raw_text=raw_text,
         extracted_code=code,
         critique=critique,
+    )
+
+
+@dataclass(frozen=True)
+class _Gradient:
+    """The pass-count signal extracted from a verifier's report file."""
+
+    tests_passed: int
+    tests_total: int
+    failures: tuple[str, ...]
+
+    @property
+    def passed(self) -> bool:
+        return self.tests_total > 0 and self.tests_passed == self.tests_total
+
+
+def _read_gradient_report(report_path: Path, *, returncode: int) -> _Gradient:
+    """Read the verifier's structured report, falling back to binary signal.
+
+    Verify scripts emit a JSON report with ``tests_passed``, ``tests_total``,
+    and ``failures``. If the file is missing, malformed, or has the wrong
+    shape (e.g., a verifier that hasn't been updated to the new protocol),
+    we synthesize a 1/1 pass / 0/1 fail from the subprocess returncode so
+    the ratchet still has a meaningful signal.
+    """
+    fallback = (
+        _Gradient(tests_passed=1, tests_total=1, failures=())
+        if returncode == 0
+        else _Gradient(
+            tests_passed=0,
+            tests_total=1,
+            failures=("verify exited non-zero",),
+        )
+    )
+    if not report_path.is_file():
+        return fallback
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return fallback
+    if not isinstance(payload, dict):
+        return fallback
+    tests_passed = payload.get("tests_passed")
+    tests_total = payload.get("tests_total")
+    raw_failures = payload.get("failures", [])
+    if not isinstance(tests_passed, int) or not isinstance(tests_total, int):
+        return fallback
+    if tests_total < 0 or tests_passed < 0 or tests_passed > tests_total:
+        return fallback
+    failures: tuple[str, ...]
+    if isinstance(raw_failures, list) and all(isinstance(f, str) for f in raw_failures):
+        failures = tuple(raw_failures)
+    else:
+        failures = ()
+    return _Gradient(
+        tests_passed=tests_passed,
+        tests_total=tests_total,
+        failures=failures,
     )
 
 
@@ -453,6 +567,18 @@ def _build_summary(
         if total
         else 0.0
     )
+    kept_rounds = [
+        c.prior_best
+        for r in runs
+        for c in r.candidates
+        if c.prior_best is not None
+    ]
+    if kept_rounds:
+        mean_tests_passed = sum(rr.tests_passed for rr in kept_rounds) / len(kept_rounds)
+        mean_tests_total = sum(rr.tests_total for rr in kept_rounds) / len(kept_rounds)
+    else:
+        mean_tests_passed = 0.0
+        mean_tests_total = 0.0
     return SessionSummary(
         task=task,
         model=model,
@@ -464,6 +590,8 @@ def _build_summary(
         one_shot_passes=one_shot_passes,
         one_shot_pass_rate=one_shot_pass_rate,
         mean_latency_ms=mean_latency,
+        mean_tests_passed=mean_tests_passed,
+        mean_tests_total=mean_tests_total,
     )
 
 
