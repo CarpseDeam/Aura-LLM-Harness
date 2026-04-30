@@ -1,0 +1,11 @@
+{
+  "task": "duplicate_finder",
+  "runs": 5,
+  "n": 5,
+  "model": "qwen2.5-coder:7b",
+  "timeout_seconds": 30.0,
+  "critic_rounds": 2,
+  "critic_model": "deepseek-r1:14b",
+  "harness_git_sha": "5fe81d61a432ab46b94923c7c8f28d90eb7fe737",
+  "start_time": "2026-04-30T21:08:46.672519+00:00"
+}

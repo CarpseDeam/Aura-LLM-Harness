@@ -1,75 +1,65 @@
 ## Goal
-Replace binary pass/fail evaluation with a gradient (pass-count) signal, and use it to enforce monotonic improvement across critic rounds. Currently a critic round can produce code that passes fewer tests than the prior round, and the runner happily moves forward with worse code. We want a one-way ratchet: a retry only replaces the prior-best if it ratchets the pass-count forward.
+Right now `python -m aura_harness.bench` prints the session path and then nothing until it finishes. For long runs (45-90 min) this gives the user no way to tell if it's progressing or stuck. Add stdout progress logging and a `progress.json` file in the session directory.
 
-## Verifier protocol change
-Verify scripts under `bench/tasks/<task>/verify.py` currently exit 0/1. They will now also write a JSON report to a path passed as their third positional argument (the runner already passes a report path — see `_verify_candidate_round` in `runner.py`).
+## Stdout progress
+Print to stdout on these events, in `bench/runner.py`:
 
-The report format:
+- Run start: `[run 1/5] starting batch generation...`
+- Round 0 candidate complete: `[run 1/5 cand 3/5] round 0: 7/9 tests passed (12.4s)`
+- Critic call: `[run 1/5 cand 3/5] critic round 1...` and on completion `[run 1/5 cand 3/5] critic round 1 done (28.1s, 3 violations)`
+- Retry generation: `[run 1/5 cand 3/5] retry round 1...` and on completion `[run 1/5 cand 3/5] retry round 1: 8/9 tests passed (RATCHET) (31.2s)` or `[run 1/5 cand 3/5] retry round 1: 5/9 tests passed (rejected) (29.7s)`
+- Model unload: `[unload] qwen2.5-coder:7b` (these are noisy — gate behind a `--verbose` flag, default off)
+- Run complete: `[run 1/5] complete: 4/5 passed in 14m21s`
+- Session complete: `[done] 18/25 passed (72%) in 47m12s, written to <session_dir>`
+
+Format is freeform but use the `[run X/Y cand A/B]` prefix consistently so the user can grep/filter.
+
+Use `print(..., flush=True)` so output appears immediately under buffering (Windows console is particularly bad about this).
+
+## progress.json
+The runner writes/overwrites `<session_dir>/progress.json` on every meaningful event. Schema:
+
 ```json
 {
-  "tests_passed": 7,
-  "tests_total": 10,
-  "failures": ["test name 1", "test name 2", "test name 3"]
+  "status": "running" | "complete" | "error",
+  "started_at": "<iso8601>",
+  "elapsed_seconds": 1247.3,
+  "current_run": 2,
+  "total_runs": 5,
+  "current_candidate": 3,
+  "candidates_per_run": 5,
+  "current_round": 1,
+  "current_phase": "generating" | "critiquing" | "retrying" | "verifying" | "idle",
+  "passes_so_far": 7,
+  "candidates_completed": 12,
+  "total_candidates": 25,
+  "ratchets_accepted": 4,
+  "ratchets_rejected": 3,
+  "last_event": "retry round 1: 8/9 tests passed (RATCHET)"
 }
 ```
 
-The runner reads this report after the subprocess exits. If the report file is missing or malformed, fall back to the binary `returncode == 0` signal (treat pass as `tests_passed=1, tests_total=1`, fail as `0, 1`). This keeps the runner backward compatible with any verify scripts that haven't been updated.
+Doesn't have to be atomic-write-perfect — best-effort overwrite is fine. If a write fails, log the error and continue (progress is observability, not correctness).
 
-Update `bench/tasks/duplicate_finder/verify.py` to emit this report. Decompose its current monolithic check into discrete named assertions — at minimum: "module imports", "produces output file", "output is valid JSON", "all paths are relative", "all paths use forward slashes", "duplicate groups are correct". Use whatever decomposition feels natural; the count matters more than the exact names.
+Update on these events: every candidate completion, every round transition, every critic/retry phase boundary. A few writes per second at peak is fine.
 
-The other four task folders (cron_parser, log_tailer, etc.) don't exist yet, so don't touch them.
+On run completion or exception, set `status` to `complete` or `error` and stop updating.
 
-## Data model changes
-`RoundResult` (in `bench/models.py`) gains:
-- `tests_passed: int`
-- `tests_total: int`
-- `failures: tuple[str, ...]`
-
-The existing `passed: bool` field stays — it's `tests_passed == tests_total and tests_total > 0`.
-
-`SessionSummary` gains aggregate gradient stats: `mean_tests_passed`, `mean_tests_total`. Compute across all final-round results (the round we kept per candidate).
-
-JSONL session output naturally inherits these fields.
-
-## Ratchet logic in `_resolve_candidate_slot`
-Current behavior: each round generates a retry, and the next round's prompt uses the *most recent* round's code as `previous_code`. Failed retries replace the prior code in the prompt.
-
-New behavior: track the **prior best** round (highest `tests_passed`, ties broken by most recent). The retry prompt always uses the prior-best's code as `previous_code` and the prior-best's critique. If a new retry's `tests_passed` is strictly greater than prior-best, it becomes the new prior-best. If equal or worse, it's logged in `rounds` but does NOT become the new prior-best — the next round retries against the same prior-best again with a fresh seed.
-
-Termination conditions for the per-candidate loop (any of these stop it):
-- Prior-best passes (`tests_passed == tests_total`).
-- We've hit `critic_rounds` total retries (regardless of how many were ratchet-accepted).
-- Critic returns no actionable violations.
-- Code extraction fails on the prior-best (can't generate a follow-up prompt).
-
-The candidate's final `passed` field is whether the prior-best passed. All rounds (including rejected retries) are kept in `rounds` for inspection — so the JSONL still has every attempt, with the rejected ones flagged.
-
-Add a new field on `RoundResult`: `ratchet_accepted: bool` — true for round 0 and for any retry that strictly improved on prior-best.
-
-## Test fallback for backward compat
-If a verify script doesn't emit a report file (older tasks, or a crash before report write), the runner synthesizes:
-- pass: `tests_passed=1, tests_total=1, failures=()`
-- fail: `tests_passed=0, tests_total=1, failures=("verify exited non-zero",)`
-
-This keeps the ratchet meaningful in the degenerate case (it just becomes the old binary behavior).
-
-## Files to change
-- `src/aura_harness/bench/models.py` — extend `RoundResult` and `SessionSummary`.
-- `src/aura_harness/bench/runner.py` — read report file, implement ratchet in `_resolve_candidate_slot`, update `_build_summary`.
-- `bench/tasks/duplicate_finder/verify.py` — emit report.
-- `src/aura_harness/bench/session.py` — if write_summary or write_batch needs to know about new fields, update accordingly.
+## Where this goes
+- `src/aura_harness/bench/runner.py` — the print statements and progress.json writes.
+- Probably a small helper class `_ProgressTracker` in the same file that owns the counters and the json path. Keep it private to runner.py; no need for a separate module.
+- Add `--verbose` flag to `bench/__main__.py` to enable the noisy unload prints.
 
 ## Definition of done
-- `python -m aura_harness.bench --task duplicate_finder --runs 1 --n 3 --critic-rounds 2 --critic-model deepseek-r1:14b` runs to completion.
-- The session's `batches/batch-000.jsonl` shows `tests_passed`, `tests_total`, `failures`, and `ratchet_accepted` on every round.
-- The session's `summary.json` shows `mean_tests_passed` and `mean_tests_total`.
-- A retry that scores worse than prior-best appears in the rounds list with `ratchet_accepted: false` and does NOT influence the next round's prompt.
-- Existing tests still pass. Add tests if you find yourself touching code paths that have tests already covering them; don't add new test files.
+- A long bench run produces continuous stdout output.
+- `<session_dir>/progress.json` exists and updates during the run.
+- After completion, `progress.json` shows `status: "complete"` and the final stats.
+- All 68 existing tests still pass.
 
 ## Out of scope
-- Population-level / cross-candidate ratcheting. Per-candidate only for this dispatch.
-- New bench tasks. Just `duplicate_finder` for now.
-- Any model unloading work — that's already landed in a prior dispatch, leave it alone.
-- Any planner or critic prompt changes.
+- Any UI work. This is stdout + json file only.
+- A separate watch/tail tool. We'll discuss that as a UX question.
+- Restructuring the bench pipeline (batch-mode generation, etc.) — separate dispatch.
+- Changing the JSONL session format — leave that alone.
 
 Be methodical. Read what you need, make the change, stop. Match existing code style. Type hints everywhere.

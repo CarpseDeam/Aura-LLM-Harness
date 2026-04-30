@@ -62,6 +62,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--critic-model", default=DEFAULT_CRITIC_MODEL,
         help=f"Reasoning model for the critic (default: {DEFAULT_CRITIC_MODEL}).",
     )
+    p.add_argument(
+        "--verbose", action="store_true",
+        help="Print noisy [unload] lines on every model eviction.",
+    )
     return p
 
 
@@ -108,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
             critic_rounds=args.critic_rounds,
             critic_model=args.critic_model,
             on_session_created=_announce_session,
+            verbose=args.verbose,
         )
     except FileNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)

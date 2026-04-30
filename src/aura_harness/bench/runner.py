@@ -25,10 +25,10 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from aura_harness.bench.models import (
     BenchConfig,
@@ -64,6 +64,7 @@ _TASKS_SUBDIR: Final[str] = "bench/tasks"
 _SESSIONS_SUBDIR: Final[str] = "sessions"
 _CANDIDATE_MODULE_FILENAME: Final[str] = "candidate_module.py"
 _CANDIDATE_REPORT_FILENAME: Final[str] = "report.json"
+_PROGRESS_FILENAME: Final[str] = "progress.json"
 _GIT_UNKNOWN: Final[str] = "unknown"
 _REFLEXION_SEED_MAX: Final[int] = 2**31 - 1
 
@@ -98,6 +99,214 @@ _REFLEXION_PROMPT_TEMPLATE: Final[str] = (
 _NO_ITEMS_PLACEHOLDER: Final[str] = "- (none provided)"
 
 
+@dataclass
+class _ProgressTracker:
+    """Owns stdout progress lines and the ``progress.json`` file.
+
+    Best-effort observability layer: any failure to write ``progress.json``
+    is logged and swallowed so the bench keeps running.
+    """
+
+    session_dir: Path
+    total_runs: int
+    candidates_per_run: int
+    started_at: str
+    started_perf: float
+    verbose: bool = False
+    status: str = "running"
+    current_run: int = 0
+    current_candidate: int = 0
+    current_round: int = 0
+    current_phase: str = "idle"
+    passes_so_far: int = 0
+    candidates_completed: int = 0
+    ratchets_accepted: int = 0
+    ratchets_rejected: int = 0
+    last_event: str = ""
+    _cand_prefix: str = field(default="", init=False)
+    _run_prefix: str = field(default="", init=False)
+
+    @property
+    def total_candidates(self) -> int:
+        return self.total_runs * self.candidates_per_run
+
+    def write(self) -> None:
+        payload: dict[str, Any] = {
+            "status": self.status,
+            "started_at": self.started_at,
+            "elapsed_seconds": round(time.perf_counter() - self.started_perf, 2),
+            "current_run": self.current_run,
+            "total_runs": self.total_runs,
+            "current_candidate": self.current_candidate,
+            "candidates_per_run": self.candidates_per_run,
+            "current_round": self.current_round,
+            "current_phase": self.current_phase,
+            "passes_so_far": self.passes_so_far,
+            "candidates_completed": self.candidates_completed,
+            "total_candidates": self.total_candidates,
+            "ratchets_accepted": self.ratchets_accepted,
+            "ratchets_rejected": self.ratchets_rejected,
+            "last_event": self.last_event,
+        }
+        path = self.session_dir / _PROGRESS_FILENAME
+        try:
+            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except OSError as exc:
+            logger.warning("progress.json write failed: %s", exc)
+
+    def session_started(self) -> None:
+        self.last_event = "session started"
+        self.write()
+
+    def start_run(self, run_index: int) -> None:
+        self.current_run = run_index + 1
+        self.current_candidate = 0
+        self.current_round = 0
+        self.current_phase = "generating"
+        self._run_prefix = f"[run {self.current_run}/{self.total_runs}]"
+        self._cand_prefix = ""
+        message = "starting batch generation..."
+        self.last_event = message
+        print(f"{self._run_prefix} {message}", flush=True)
+        self.write()
+
+    def start_candidate(self, candidate_index: int) -> None:
+        self.current_candidate = candidate_index + 1
+        self.current_round = 0
+        self.current_phase = "verifying"
+        self._cand_prefix = (
+            f"[run {self.current_run}/{self.total_runs} "
+            f"cand {self.current_candidate}/{self.candidates_per_run}]"
+        )
+        self.write()
+
+    def round_zero_done(
+        self, *, tests_passed: int, tests_total: int, elapsed_s: float
+    ) -> None:
+        self.current_round = 0
+        self.current_phase = "idle"
+        message = (
+            f"round 0: {tests_passed}/{tests_total} tests passed "
+            f"({_fmt_short(elapsed_s)})"
+        )
+        self.last_event = message
+        print(f"{self._cand_prefix} {message}", flush=True)
+        self.write()
+
+    def start_critic(self, round_index: int) -> None:
+        self.current_round = round_index
+        self.current_phase = "critiquing"
+        message = f"critic round {round_index}..."
+        self.last_event = message
+        print(f"{self._cand_prefix} {message}", flush=True)
+        self.write()
+
+    def critic_done(
+        self, *, round_index: int, elapsed_s: float, violations: int
+    ) -> None:
+        self.current_phase = "idle"
+        message = (
+            f"critic round {round_index} done "
+            f"({_fmt_short(elapsed_s)}, {violations} violations)"
+        )
+        self.last_event = message
+        print(f"{self._cand_prefix} {message}", flush=True)
+        self.write()
+
+    def start_retry(self, round_index: int) -> None:
+        self.current_round = round_index
+        self.current_phase = "retrying"
+        message = f"retry round {round_index}..."
+        self.last_event = message
+        print(f"{self._cand_prefix} {message}", flush=True)
+        self.write()
+
+    def retry_done(
+        self,
+        *,
+        round_index: int,
+        tests_passed: int,
+        tests_total: int,
+        accepted: bool,
+        elapsed_s: float,
+    ) -> None:
+        if accepted:
+            self.ratchets_accepted += 1
+            verdict = "RATCHET"
+        else:
+            self.ratchets_rejected += 1
+            verdict = "rejected"
+        self.current_phase = "idle"
+        message = (
+            f"retry round {round_index}: {tests_passed}/{tests_total} tests passed "
+            f"({verdict}) ({_fmt_short(elapsed_s)})"
+        )
+        self.last_event = message
+        print(f"{self._cand_prefix} {message}", flush=True)
+        self.write()
+
+    def candidate_done(self, *, passed: bool) -> None:
+        self.candidates_completed += 1
+        if passed:
+            self.passes_so_far += 1
+        self.current_phase = "idle"
+        self.write()
+
+    def run_complete(
+        self, *, run_passes: int, run_total: int, elapsed_s: float
+    ) -> None:
+        message = (
+            f"complete: {run_passes}/{run_total} passed in {_fmt_long(elapsed_s)}"
+        )
+        self.last_event = message
+        print(f"{self._run_prefix} {message}", flush=True)
+        self.current_phase = "idle"
+        self.write()
+
+    def session_complete(
+        self,
+        *,
+        passes: int,
+        total: int,
+        elapsed_s: float,
+    ) -> None:
+        pct = (passes / total * 100.0) if total else 0.0
+        message = (
+            f"{passes}/{total} passed ({pct:.0f}%) in {_fmt_long(elapsed_s)}, "
+            f"written to {self.session_dir}"
+        )
+        self.last_event = message
+        self.current_phase = "idle"
+        self.status = "complete"
+        print(f"[done] {message}", flush=True)
+        self.write()
+
+    def session_errored(self, exc: BaseException) -> None:
+        self.status = "error"
+        self.last_event = f"error: {type(exc).__name__}: {exc}"
+        self.write()
+
+    def unload(self, client: OllamaClient, model: str) -> None:
+        client.unload_model(model)
+        if self.verbose:
+            print(f"[unload] {model}", flush=True)
+
+
+def _fmt_short(seconds: float) -> str:
+    """Format a sub-minute duration as ``"12.4s"``."""
+    return f"{seconds:.1f}s"
+
+
+def _fmt_long(seconds: float) -> str:
+    """Format a long duration as ``"14m21s"`` or ``"1h05m12s"``."""
+    total = int(seconds)
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    return f"{minutes}m{secs:02d}s"
+
+
 def run_bench(
     task: str,
     runs: int = DEFAULT_RUNS,
@@ -109,6 +318,7 @@ def run_bench(
     critic_model: str = DEFAULT_CRITIC_MODEL,
     project_root: Path | None = None,
     on_session_created: Callable[[Path], None] | None = None,
+    verbose: bool = False,
 ) -> tuple[Path, SessionSummary]:
     """Run a bench task and return ``(session_dir, summary)``.
 
@@ -129,6 +339,8 @@ def run_bench(
         on_session_created: Called with the session folder path immediately
             after it is created on disk, before any candidates are generated.
             The CLI uses this to surface the path to the user up front.
+        verbose: When ``True`` the runner prints noisy ``[unload] <model>``
+            lines on every model eviction. Default ``False``.
 
     Returns:
         A ``(session_dir, summary)`` pair. The session folder is fully
@@ -173,6 +385,17 @@ def run_bench(
     if on_session_created is not None:
         on_session_created(session_dir)
 
+    session_started_perf = time.perf_counter()
+    tracker = _ProgressTracker(
+        session_dir=session_dir,
+        total_runs=runs,
+        candidates_per_run=n,
+        started_at=config.start_time,
+        started_perf=session_started_perf,
+        verbose=verbose,
+    )
+    tracker.session_started()
+
     client = OllamaClient(default_model=model)
     generator = CandidateGenerator(client)
     critic: CriticClient | None = (
@@ -181,51 +404,69 @@ def run_bench(
 
     run_results: list[RunResult] = []
     last_model_used: str = model
-    for run_index in range(runs):
-        run_started = time.perf_counter()
-        batch = generator.generate(spec_text, n=n, model=model)
-        client.unload_model(model)
-        last_model_used = model
+    try:
+        for run_index in range(runs):
+            tracker.start_run(run_index)
+            run_started = time.perf_counter()
+            batch = generator.generate(spec_text, n=n, model=model)
+            tracker.unload(client, model)
+            last_model_used = model
 
-        slot_results: list[CandidateResult] = []
-        for cand in batch.candidates:
-            slot_result, slot_last_model = _resolve_candidate_slot(
+            slot_results: list[CandidateResult] = []
+            for cand in batch.candidates:
+                slot_result, slot_last_model = _resolve_candidate_slot(
+                    run_index=run_index,
+                    candidate=cand,
+                    spec_text=spec_text,
+                    verify_path=verify_path,
+                    fixtures_dir=fixtures_dir,
+                    timeout_seconds=timeout_seconds,
+                    critic=critic,
+                    critic_rounds=critic_rounds,
+                    generator=generator,
+                    model=model,
+                    client=client,
+                    tracker=tracker,
+                )
+                slot_results.append(slot_result)
+                last_model_used = slot_last_model
+            candidate_results = tuple(slot_results)
+
+            run_duration_ms = (time.perf_counter() - run_started) * 1000.0
+            run_result = RunResult(
                 run_index=run_index,
-                candidate=cand,
-                spec_text=spec_text,
-                verify_path=verify_path,
-                fixtures_dir=fixtures_dir,
-                timeout_seconds=timeout_seconds,
-                critic=critic,
-                critic_rounds=critic_rounds,
-                generator=generator,
-                model=model,
-                client=client,
+                batch_id=batch.batch_id,
+                candidates=candidate_results,
+                run_duration_ms=run_duration_ms,
             )
-            slot_results.append(slot_result)
-            last_model_used = slot_last_model
-        candidate_results = tuple(slot_results)
+            run_results.append(run_result)
+            write_batch(session_dir, run_index, batch, run_result)
+            run_passes = sum(1 for c in candidate_results if c.passed)
+            tracker.run_complete(
+                run_passes=run_passes,
+                run_total=len(candidate_results),
+                elapsed_s=run_duration_ms / 1000.0,
+            )
 
-        run_duration_ms = (time.perf_counter() - run_started) * 1000.0
-        run_result = RunResult(
-            run_index=run_index,
-            batch_id=batch.batch_id,
-            candidates=candidate_results,
-            run_duration_ms=run_duration_ms,
+        write_results(session_dir, run_results)
+        summary = _build_summary(
+            task=task,
+            model=model,
+            critic_rounds=critic_rounds,
+            critic_model=critic_model,
+            runs=run_results,
         )
-        run_results.append(run_result)
-        write_batch(session_dir, run_index, batch, run_result)
+        write_summary(session_dir, summary)
+        tracker.unload(client, last_model_used)
+    except BaseException as exc:
+        tracker.session_errored(exc)
+        raise
 
-    write_results(session_dir, run_results)
-    summary = _build_summary(
-        task=task,
-        model=model,
-        critic_rounds=critic_rounds,
-        critic_model=critic_model,
-        runs=run_results,
+    tracker.session_complete(
+        passes=summary.passes,
+        total=summary.total_candidates,
+        elapsed_s=time.perf_counter() - session_started_perf,
     )
-    write_summary(session_dir, summary)
-    client.unload_model(last_model_used)
     return session_dir, summary
 
 
@@ -242,6 +483,7 @@ def _resolve_candidate_slot(
     generator: CandidateGenerator,
     model: str,
     client: OllamaClient,
+    tracker: _ProgressTracker,
 ) -> tuple[CandidateResult, str]:
     """Run round 0 and any reflexion rounds for a single candidate slot.
 
@@ -254,6 +496,8 @@ def _resolve_candidate_slot(
     LLM model touched while resolving this slot. The caller uses that name
     to issue a final eviction once the run finishes, keeping VRAM clean.
     """
+    tracker.start_candidate(candidate.index)
+    round_zero_started = time.perf_counter()
     round_zero = _verify_candidate_round(
         round_index=0,
         candidate=candidate,
@@ -263,6 +507,15 @@ def _resolve_candidate_slot(
         critique=None,
         ratchet_accepted=True,
     )
+    round_zero_elapsed = (
+        candidate.wall_duration_ms / 1000.0
+        + (time.perf_counter() - round_zero_started)
+    )
+    tracker.round_zero_done(
+        tests_passed=round_zero.tests_passed,
+        tests_total=round_zero.tests_total,
+        elapsed_s=round_zero_elapsed,
+    )
 
     rounds: list[RoundResult] = [round_zero]
     last_llm_model: str = model
@@ -270,6 +523,7 @@ def _resolve_candidate_slot(
     prior_critique: Critique | None = None
 
     if critic is None or critic_rounds <= 0 or round_zero.passed:
+        tracker.candidate_done(passed=round_zero.passed)
         return (
             CandidateResult(
                 run_index=run_index,
@@ -287,9 +541,16 @@ def _resolve_candidate_slot(
             break
 
         if prior_critique is None:
+            tracker.start_critic(next_round_index)
+            critic_started = time.perf_counter()
             critique = critic.review(spec_text, prior_best.extracted_code)
-            client.unload_model(critic.model)
+            tracker.unload(client, critic.model)
             last_llm_model = critic.model
+            tracker.critic_done(
+                round_index=next_round_index,
+                elapsed_s=time.perf_counter() - critic_started,
+                violations=len(critique.violations),
+            )
             if critique.passed or not critique.violations:
                 # Critic sees nothing actionable; further rounds would just
                 # re-prompt with empty feedback. Stop and keep the slot failed.
@@ -302,13 +563,15 @@ def _resolve_candidate_slot(
             critique=prior_critique,
         )
         new_seed = random.randint(0, _REFLEXION_SEED_MAX)
+        tracker.start_retry(next_round_index)
+        retry_started = time.perf_counter()
         retry_batch = generator.generate(
             follow_up_prompt,
             n=1,
             model=model,
             base_seed=new_seed,
         )
-        client.unload_model(model)
+        tracker.unload(client, model)
         last_llm_model = model
         retry_candidate = retry_batch.candidates[0]
         next_round = _verify_candidate_round(
@@ -321,6 +584,13 @@ def _resolve_candidate_slot(
             ratchet_accepted=False,
         )
         accepted = next_round.tests_passed > prior_best.tests_passed
+        tracker.retry_done(
+            round_index=next_round_index,
+            tests_passed=next_round.tests_passed,
+            tests_total=next_round.tests_total,
+            accepted=accepted,
+            elapsed_s=time.perf_counter() - retry_started,
+        )
         if accepted:
             next_round = _with_ratchet(next_round, accepted=True)
             prior_best = next_round
@@ -331,15 +601,14 @@ def _resolve_candidate_slot(
         if prior_best.passed:
             break
 
-    return (
-        CandidateResult(
-            run_index=run_index,
-            candidate_index=candidate.index,
-            seed=candidate.seed,
-            rounds=tuple(rounds),
-        ),
-        last_llm_model,
+    slot_result = CandidateResult(
+        run_index=run_index,
+        candidate_index=candidate.index,
+        seed=candidate.seed,
+        rounds=tuple(rounds),
     )
+    tracker.candidate_done(passed=slot_result.passed)
+    return slot_result, last_llm_model
 
 
 def _with_ratchet(round_result: RoundResult, *, accepted: bool) -> RoundResult:
