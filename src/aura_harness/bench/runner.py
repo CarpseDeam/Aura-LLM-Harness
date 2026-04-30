@@ -25,6 +25,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,7 +47,7 @@ from aura_harness.bench.session import (
 )
 from aura_harness.critic import CriticClient, Critique, DEFAULT_CRITIC_MODEL
 from aura_harness.lab.generator import CandidateGenerator
-from aura_harness.lab.models import Candidate
+from aura_harness.lab.models import Candidate, CandidateBatch
 from aura_harness.llm import OllamaClient
 from aura_harness.scoring import extract_code
 
@@ -57,6 +58,8 @@ DEFAULT_N: Final[int] = 3
 DEFAULT_MODEL: Final[str] = "qwen2.5-coder:7b"
 DEFAULT_VERIFY_TIMEOUT_SECONDS: Final[float] = 30.0
 DEFAULT_CRITIC_ROUNDS: Final[int] = 0
+DEFAULT_CRITIC_PARALLELISM: Final[int] = 4
+DEFAULT_RETRY_PARALLELISM: Final[int] = 4
 
 _GIT_TIMEOUT_SECONDS: Final[float] = 5.0
 _STDERR_PREVIEW_CHARS: Final[int] = 4000
@@ -123,7 +126,6 @@ class _ProgressTracker:
     ratchets_accepted: int = 0
     ratchets_rejected: int = 0
     last_event: str = ""
-    _cand_prefix: str = field(default="", init=False)
     _run_prefix: str = field(default="", init=False)
 
     @property
@@ -164,66 +166,64 @@ class _ProgressTracker:
         self.current_round = 0
         self.current_phase = "generating"
         self._run_prefix = f"[run {self.current_run}/{self.total_runs}]"
-        self._cand_prefix = ""
         message = "starting batch generation..."
         self.last_event = message
         print(f"{self._run_prefix} {message}", flush=True)
         self.write()
 
-    def start_candidate(self, candidate_index: int) -> None:
-        self.current_candidate = candidate_index + 1
-        self.current_round = 0
-        self.current_phase = "verifying"
-        self._cand_prefix = (
-            f"[run {self.current_run}/{self.total_runs} "
-            f"cand {self.current_candidate}/{self.candidates_per_run}]"
+    def start_phase(self, *, label: str, verb: str, count: int) -> None:
+        """Emit a phase-boundary event covering ``count`` candidates."""
+        self.current_phase = label
+        suffix = "candidate" if count == 1 else "candidates"
+        message = f"{verb} {count} {suffix}"
+        self.last_event = f"phase {label}: {message}"
+        print(
+            f"[run {self.current_run}/{self.total_runs} phase: {label}] "
+            f"{message}",
+            flush=True,
         )
         self.write()
 
-    def round_zero_done(
-        self, *, tests_passed: int, tests_total: int, elapsed_s: float
+    def round_zero_done_for_candidate(
+        self,
+        *,
+        candidate_index: int,
+        tests_passed: int,
+        tests_total: int,
+        elapsed_s: float,
     ) -> None:
+        self.current_candidate = candidate_index + 1
         self.current_round = 0
-        self.current_phase = "idle"
         message = (
             f"round 0: {tests_passed}/{tests_total} tests passed "
             f"({_fmt_short(elapsed_s)})"
         )
         self.last_event = message
-        print(f"{self._cand_prefix} {message}", flush=True)
+        print(f"{self._prefix_for(candidate_index)} {message}", flush=True)
         self.write()
 
-    def start_critic(self, round_index: int) -> None:
-        self.current_round = round_index
-        self.current_phase = "critiquing"
-        message = f"critic round {round_index}..."
-        self.last_event = message
-        print(f"{self._cand_prefix} {message}", flush=True)
-        self.write()
-
-    def critic_done(
-        self, *, round_index: int, elapsed_s: float, violations: int
+    def critic_done_for_candidate(
+        self,
+        *,
+        candidate_index: int,
+        round_index: int,
+        elapsed_s: float,
+        violations: int,
     ) -> None:
-        self.current_phase = "idle"
+        self.current_candidate = candidate_index + 1
+        self.current_round = round_index
         message = (
             f"critic round {round_index} done "
             f"({_fmt_short(elapsed_s)}, {violations} violations)"
         )
         self.last_event = message
-        print(f"{self._cand_prefix} {message}", flush=True)
+        print(f"{self._prefix_for(candidate_index)} {message}", flush=True)
         self.write()
 
-    def start_retry(self, round_index: int) -> None:
-        self.current_round = round_index
-        self.current_phase = "retrying"
-        message = f"retry round {round_index}..."
-        self.last_event = message
-        print(f"{self._cand_prefix} {message}", flush=True)
-        self.write()
-
-    def retry_done(
+    def retry_done_for_candidate(
         self,
         *,
+        candidate_index: int,
         round_index: int,
         tests_passed: int,
         tests_total: int,
@@ -236,14 +236,21 @@ class _ProgressTracker:
         else:
             self.ratchets_rejected += 1
             verdict = "rejected"
-        self.current_phase = "idle"
+        self.current_candidate = candidate_index + 1
+        self.current_round = round_index
         message = (
             f"retry round {round_index}: {tests_passed}/{tests_total} tests passed "
             f"({verdict}) ({_fmt_short(elapsed_s)})"
         )
         self.last_event = message
-        print(f"{self._cand_prefix} {message}", flush=True)
+        print(f"{self._prefix_for(candidate_index)} {message}", flush=True)
         self.write()
+
+    def _prefix_for(self, candidate_index: int) -> str:
+        return (
+            f"[run {self.current_run}/{self.total_runs} "
+            f"cand {candidate_index + 1}/{self.candidates_per_run}]"
+        )
 
     def candidate_done(self, *, passed: bool) -> None:
         self.candidates_completed += 1
@@ -412,24 +419,21 @@ def run_bench(
             tracker.unload(client, model)
             last_model_used = model
 
-            slot_results: list[CandidateResult] = []
-            for cand in batch.candidates:
-                slot_result, slot_last_model = _resolve_candidate_slot(
-                    run_index=run_index,
-                    candidate=cand,
-                    spec_text=spec_text,
-                    verify_path=verify_path,
-                    fixtures_dir=fixtures_dir,
-                    timeout_seconds=timeout_seconds,
-                    critic=critic,
-                    critic_rounds=critic_rounds,
-                    generator=generator,
-                    model=model,
-                    client=client,
-                    tracker=tracker,
-                )
-                slot_results.append(slot_result)
-                last_model_used = slot_last_model
+            slot_results, run_last_model = _resolve_run(
+                run_index=run_index,
+                batch=batch,
+                spec_text=spec_text,
+                verify_path=verify_path,
+                fixtures_dir=fixtures_dir,
+                timeout_seconds=timeout_seconds,
+                critic=critic,
+                critic_rounds=critic_rounds,
+                generator=generator,
+                model=model,
+                client=client,
+                tracker=tracker,
+            )
+            last_model_used = run_last_model
             candidate_results = tuple(slot_results)
 
             run_duration_ms = (time.perf_counter() - run_started) * 1000.0
@@ -470,10 +474,37 @@ def run_bench(
     return session_dir, summary
 
 
-def _resolve_candidate_slot(
+@dataclass
+class _CandidateState:
+    """Per-candidate state threaded across phase boundaries.
+
+    The phase pipeline mutates this in-place: ``rounds`` accumulates one
+    :class:`RoundResult` per attempt, ``prior_best`` tracks the ratchet's
+    current best, ``prior_critique`` carries an unconsumed critique forward
+    when a retry was rejected, and ``alive`` decides whether the candidate
+    participates in subsequent phases.
+    """
+
+    candidate: Candidate
+    rounds: list[RoundResult]
+    prior_best: RoundResult
+    prior_critique: Critique | None
+    alive: bool
+    finalized: bool = False
+
+    @property
+    def index(self) -> int:
+        return self.candidate.index
+
+    @property
+    def seed(self) -> int:
+        return self.candidate.seed
+
+
+def _resolve_run(
     *,
     run_index: int,
-    candidate: Candidate,
+    batch: CandidateBatch,
     spec_text: str,
     verify_path: Path,
     fixtures_dir: Path,
@@ -484,20 +515,110 @@ def _resolve_candidate_slot(
     model: str,
     client: OllamaClient,
     tracker: _ProgressTracker,
-) -> tuple[CandidateResult, str]:
-    """Run round 0 and any reflexion rounds for a single candidate slot.
+) -> tuple[list[CandidateResult], str]:
+    """Resolve all candidate slots in one run as a sequence of phases.
 
-    Reflexion rounds use a one-way ratchet on ``tests_passed``: a retry
-    only replaces the prior-best (and feeds the next prompt) if it
-    strictly improves the pass-count. Rejected retries are still kept in
-    the rounds list with ``ratchet_accepted=False`` for inspection.
+    The pipeline is: round-0 verify → (critic round k → retry round k) for
+    ``k`` in ``1..critic_rounds``. Each phase loads exactly one model,
+    parallelizes the work it needs against that model, then unloads. The
+    ratchet decision (a retry replaces the prior-best only when it
+    strictly improves ``tests_passed``) is unchanged from the per-slot
+    implementation — only the scheduling differs.
 
-    Returns the resolved :class:`CandidateResult` plus the name of the last
-    LLM model touched while resolving this slot. The caller uses that name
-    to issue a final eviction once the run finishes, keeping VRAM clean.
+    Returns the per-slot :class:`CandidateResult` list plus the name of the
+    last LLM model touched, which the caller uses for the final eviction.
     """
-    tracker.start_candidate(candidate.index)
-    round_zero_started = time.perf_counter()
+    states: list[_CandidateState] = [
+        _initialize_round_zero_state(
+            candidate=cand,
+            verify_path=verify_path,
+            fixtures_dir=fixtures_dir,
+            timeout_seconds=timeout_seconds,
+            critic_enabled=critic is not None and critic_rounds > 0,
+            tracker=tracker,
+        )
+        for cand in batch.candidates
+    ]
+    for state in states:
+        _maybe_finalize(state, tracker)
+
+    last_llm_model: str = model
+
+    if critic is not None and critic_rounds > 0:
+        for round_index in range(1, critic_rounds + 1):
+            to_critique = [
+                s for s in states if s.alive and s.prior_critique is None
+            ]
+            if to_critique:
+                tracker.start_phase(
+                    label=f"critic round {round_index}",
+                    verb="critiquing",
+                    count=len(to_critique),
+                )
+                _run_critic_phase(
+                    states=to_critique,
+                    spec_text=spec_text,
+                    critic=critic,
+                    round_index=round_index,
+                    tracker=tracker,
+                )
+                tracker.unload(client, critic.model)
+                last_llm_model = critic.model
+                for state in to_critique:
+                    _maybe_finalize(state, tracker)
+
+            to_retry = [
+                s for s in states if s.alive and s.prior_critique is not None
+            ]
+            if not to_retry:
+                break
+            tracker.start_phase(
+                label=f"retry round {round_index}",
+                verb="retrying",
+                count=len(to_retry),
+            )
+            _run_retry_phase(
+                states=to_retry,
+                spec_text=spec_text,
+                generator=generator,
+                model=model,
+                verify_path=verify_path,
+                fixtures_dir=fixtures_dir,
+                timeout_seconds=timeout_seconds,
+                round_index=round_index,
+                tracker=tracker,
+            )
+            tracker.unload(client, model)
+            last_llm_model = model
+
+            for state in to_retry:
+                if state.prior_best.passed:
+                    state.alive = False
+                elif state.prior_best.extracted_code is None:
+                    state.alive = False
+                elif round_index == critic_rounds:
+                    state.alive = False
+                _maybe_finalize(state, tracker)
+
+    for state in states:
+        if state.alive:
+            state.alive = False
+        _maybe_finalize(state, tracker)
+
+    return _states_to_results(states, run_index), last_llm_model
+
+
+def _initialize_round_zero_state(
+    *,
+    candidate: Candidate,
+    verify_path: Path,
+    fixtures_dir: Path,
+    timeout_seconds: float,
+    critic_enabled: bool,
+    tracker: _ProgressTracker,
+) -> _CandidateState:
+    """Verify the round-0 candidate and seed its phase-pipeline state."""
+    started = time.perf_counter()
     round_zero = _verify_candidate_round(
         round_index=0,
         candidate=candidate,
@@ -507,115 +628,199 @@ def _resolve_candidate_slot(
         critique=None,
         ratchet_accepted=True,
     )
-    round_zero_elapsed = (
+    elapsed = (
         candidate.wall_duration_ms / 1000.0
-        + (time.perf_counter() - round_zero_started)
+        + (time.perf_counter() - started)
     )
-    tracker.round_zero_done(
+    tracker.round_zero_done_for_candidate(
+        candidate_index=candidate.index,
         tests_passed=round_zero.tests_passed,
         tests_total=round_zero.tests_total,
-        elapsed_s=round_zero_elapsed,
+        elapsed_s=elapsed,
+    )
+    alive = (
+        critic_enabled
+        and not round_zero.passed
+        and round_zero.extracted_code is not None
+    )
+    return _CandidateState(
+        candidate=candidate,
+        rounds=[round_zero],
+        prior_best=round_zero,
+        prior_critique=None,
+        alive=alive,
     )
 
-    rounds: list[RoundResult] = [round_zero]
-    last_llm_model: str = model
-    prior_best = round_zero
-    prior_critique: Critique | None = None
 
-    if critic is None or critic_rounds <= 0 or round_zero.passed:
-        tracker.candidate_done(passed=round_zero.passed)
-        return (
-            CandidateResult(
-                run_index=run_index,
-                candidate_index=candidate.index,
-                seed=candidate.seed,
-                rounds=tuple(rounds),
-            ),
-            last_llm_model,
-        )
+def _run_critic_phase(
+    *,
+    states: list[_CandidateState],
+    spec_text: str,
+    critic: CriticClient,
+    round_index: int,
+    tracker: _ProgressTracker,
+) -> None:
+    """Critique every candidate in ``states`` in parallel against the critic.
 
-    for next_round_index in range(1, critic_rounds + 1):
-        if prior_best.extracted_code is None:
-            # Nothing for the critic to chew on (extraction failed or
-            # generation itself failed); reflexion can't recover from this.
-            break
-
-        if prior_critique is None:
-            tracker.start_critic(next_round_index)
-            critic_started = time.perf_counter()
-            critique = critic.review(
-                spec_text,
-                prior_best.extracted_code,
-                failures=prior_best.failures,
-                verifier_stderr=prior_best.verify_stderr,
-                tests_passed=prior_best.tests_passed,
-                tests_total=prior_best.tests_total,
-            )
-            tracker.unload(client, critic.model)
-            last_llm_model = critic.model
-            tracker.critic_done(
-                round_index=next_round_index,
-                elapsed_s=time.perf_counter() - critic_started,
+    Mutates each state: a critique with no actionable violations marks the
+    candidate dead; otherwise the critique is stored as ``prior_critique``
+    so the matching retry phase can consume it.
+    """
+    workers = max(1, min(DEFAULT_CRITIC_PARALLELISM, len(states)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(_critique_one, state, spec_text, critic): state
+            for state in states
+        }
+        for future in as_completed(futures):
+            state = futures[future]
+            critique, elapsed = future.result()
+            tracker.critic_done_for_candidate(
+                candidate_index=state.index,
+                round_index=round_index,
+                elapsed_s=elapsed,
                 violations=len(critique.violations),
             )
             if critique.passed or not critique.violations:
-                # Critic sees nothing actionable; further rounds would just
-                # re-prompt with empty feedback. Stop and keep the slot failed.
-                break
-            prior_critique = critique
+                state.alive = False
+            else:
+                state.prior_critique = critique
 
-        follow_up_prompt = _build_reflexion_prompt(
-            spec=spec_text,
-            previous_code=prior_best.extracted_code,
-            critique=prior_critique,
-        )
-        new_seed = random.randint(0, _REFLEXION_SEED_MAX)
-        tracker.start_retry(next_round_index)
-        retry_started = time.perf_counter()
-        retry_batch = generator.generate(
-            follow_up_prompt,
-            n=1,
-            model=model,
-            base_seed=new_seed,
-        )
-        tracker.unload(client, model)
-        last_llm_model = model
-        retry_candidate = retry_batch.candidates[0]
-        next_round = _verify_candidate_round(
-            round_index=next_round_index,
-            candidate=retry_candidate,
-            verify_path=verify_path,
-            fixtures_dir=fixtures_dir,
-            timeout_seconds=timeout_seconds,
-            critique=prior_critique,
-            ratchet_accepted=False,
-        )
-        accepted = next_round.tests_passed > prior_best.tests_passed
-        tracker.retry_done(
-            round_index=next_round_index,
-            tests_passed=next_round.tests_passed,
-            tests_total=next_round.tests_total,
-            accepted=accepted,
-            elapsed_s=time.perf_counter() - retry_started,
-        )
-        if accepted:
-            next_round = _with_ratchet(next_round, accepted=True)
-            prior_best = next_round
-            # The next round needs a fresh critique against the new
-            # prior-best, since the prior critique targeted older code.
-            prior_critique = None
-        rounds.append(next_round)
-        if prior_best.passed:
-            break
 
-    slot_result = CandidateResult(
-        run_index=run_index,
-        candidate_index=candidate.index,
-        seed=candidate.seed,
-        rounds=tuple(rounds),
+def _critique_one(
+    state: _CandidateState,
+    spec_text: str,
+    critic: CriticClient,
+) -> tuple[Critique, float]:
+    """Run a single critic review for ``state``'s prior-best round."""
+    started = time.perf_counter()
+    code = state.prior_best.extracted_code
+    assert code is not None, "alive states always have extracted code"
+    critique = critic.review(
+        spec_text,
+        code,
+        failures=state.prior_best.failures,
+        verifier_stderr=state.prior_best.verify_stderr,
+        tests_passed=state.prior_best.tests_passed,
+        tests_total=state.prior_best.tests_total,
     )
-    tracker.candidate_done(passed=slot_result.passed)
-    return slot_result, last_llm_model
+    return critique, time.perf_counter() - started
+
+
+def _run_retry_phase(
+    *,
+    states: list[_CandidateState],
+    spec_text: str,
+    generator: CandidateGenerator,
+    model: str,
+    verify_path: Path,
+    fixtures_dir: Path,
+    timeout_seconds: float,
+    round_index: int,
+    tracker: _ProgressTracker,
+) -> None:
+    """Generate + verify retries for every candidate in ``states`` in parallel.
+
+    Applies the ratchet to each retry: a retry only replaces ``prior_best``
+    when it strictly improves on ``tests_passed``. Rejected retries are
+    appended to ``rounds`` with ``ratchet_accepted=False`` and leave
+    ``prior_critique`` in place so the next retry round can reuse it.
+    """
+    workers = max(1, min(DEFAULT_RETRY_PARALLELISM, len(states)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(
+                _retry_one,
+                state,
+                spec_text,
+                generator,
+                model,
+                verify_path,
+                fixtures_dir,
+                timeout_seconds,
+                round_index,
+            ): state
+            for state in states
+        }
+        for future in as_completed(futures):
+            state = futures[future]
+            round_result, elapsed = future.result()
+            accepted = round_result.tests_passed > state.prior_best.tests_passed
+            if accepted:
+                round_result = _with_ratchet(round_result, accepted=True)
+                state.prior_best = round_result
+                state.prior_critique = None
+            state.rounds.append(round_result)
+            tracker.retry_done_for_candidate(
+                candidate_index=state.index,
+                round_index=round_index,
+                tests_passed=round_result.tests_passed,
+                tests_total=round_result.tests_total,
+                accepted=accepted,
+                elapsed_s=elapsed,
+            )
+
+
+def _retry_one(
+    state: _CandidateState,
+    spec_text: str,
+    generator: CandidateGenerator,
+    model: str,
+    verify_path: Path,
+    fixtures_dir: Path,
+    timeout_seconds: float,
+    round_index: int,
+) -> tuple[RoundResult, float]:
+    """Generate and verify a single retry for ``state``."""
+    started = time.perf_counter()
+    code = state.prior_best.extracted_code
+    critique = state.prior_critique
+    assert code is not None, "retry states always have extracted code"
+    assert critique is not None, "retry states always have a pending critique"
+    follow_up_prompt = _build_reflexion_prompt(
+        spec=spec_text,
+        previous_code=code,
+        critique=critique,
+    )
+    new_seed = random.randint(0, _REFLEXION_SEED_MAX)
+    retry_batch = generator.generate(
+        follow_up_prompt,
+        n=1,
+        model=model,
+        base_seed=new_seed,
+    )
+    retry_candidate = retry_batch.candidates[0]
+    round_result = _verify_candidate_round(
+        round_index=round_index,
+        candidate=retry_candidate,
+        verify_path=verify_path,
+        fixtures_dir=fixtures_dir,
+        timeout_seconds=timeout_seconds,
+        critique=critique,
+        ratchet_accepted=False,
+    )
+    return round_result, time.perf_counter() - started
+
+
+def _maybe_finalize(state: _CandidateState, tracker: _ProgressTracker) -> None:
+    """Emit ``candidate_done`` exactly once per state, when it leaves the pipeline."""
+    if not state.alive and not state.finalized:
+        state.finalized = True
+        tracker.candidate_done(passed=state.prior_best.passed)
+
+
+def _states_to_results(
+    states: list[_CandidateState], run_index: int
+) -> list[CandidateResult]:
+    return [
+        CandidateResult(
+            run_index=run_index,
+            candidate_index=state.index,
+            seed=state.seed,
+            rounds=tuple(state.rounds),
+        )
+        for state in states
+    ]
 
 
 def _with_ratchet(round_result: RoundResult, *, accepted: bool) -> RoundResult:

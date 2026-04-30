@@ -1,65 +1,58 @@
 ## Goal
-Right now `python -m aura_harness.bench` prints the session path and then nothing until it finishes. For long runs (45-90 min) this gives the user no way to tell if it's progressing or stuck. Add stdout progress logging and a `progress.json` file in the session directory.
+Restructure the bench runner from per-candidate orchestration to phase-based orchestration. Currently `_resolve_candidate_slot` runs each candidate's full lifecycle independently, which means the runner swaps models (coder → critic → coder → critic → ...) per-candidate. With ~25 candidates × 2 critic rounds and ~10s per swap, that's ~25 minutes of wall time spent on swap overhead per bench run. Phase-based orchestration cuts this to roughly 6 swaps total.
 
-## Stdout progress
-Print to stdout on these events, in `bench/runner.py`:
+## The phase pipeline
+For a single run (one batch of N candidates with K critic rounds):
 
-- Run start: `[run 1/5] starting batch generation...`
-- Round 0 candidate complete: `[run 1/5 cand 3/5] round 0: 7/9 tests passed (12.4s)`
-- Critic call: `[run 1/5 cand 3/5] critic round 1...` and on completion `[run 1/5 cand 3/5] critic round 1 done (28.1s, 3 violations)`
-- Retry generation: `[run 1/5 cand 3/5] retry round 1...` and on completion `[run 1/5 cand 3/5] retry round 1: 8/9 tests passed (RATCHET) (31.2s)` or `[run 1/5 cand 3/5] retry round 1: 5/9 tests passed (rejected) (29.7s)`
-- Model unload: `[unload] qwen2.5-coder:7b` (these are noisy — gate behind a `--verbose` flag, default off)
-- Run complete: `[run 1/5] complete: 4/5 passed in 14m21s`
-- Session complete: `[done] 18/25 passed (72%) in 47m12s, written to <session_dir>`
+1. **Phase: round-0 generation.** Coder loaded. Generate all N candidates in parallel (already parallel via ThreadPoolExecutor in CandidateGenerator). Verify each.
+2. **Phase: critic round 1.** Coder unloaded, critic loaded. Critique all candidates that failed round 0, in parallel against the loaded critic model.
+3. **Phase: retry round 1.** Critic unloaded, coder loaded. Generate retries for all candidates that got actionable critiques, in parallel. Verify each.
+4. **Phase: critic round 2.** Same as phase 2 for any candidates still failing.
+5. **Phase: retry round 2.** Same as phase 3.
+6. End-of-run unload.
 
-Format is freeform but use the `[run X/Y cand A/B]` prefix consistently so the user can grep/filter.
+Each phase: "load model X, do all the work that needs X, unload X." Within a phase, work is parallel.
 
-Use `print(..., flush=True)` so output appears immediately under buffering (Windows console is particularly bad about this).
+## Critic parallelism
+The critic is currently called serially. With phase-based orchestration, multiple critic calls can run concurrently against the loaded critic model. Use ThreadPoolExecutor — same pattern as CandidateGenerator. Default to 4 workers, configurable via a constant.
 
-## progress.json
-The runner writes/overwrites `<session_dir>/progress.json` on every meaningful event. Schema:
+## Ratchet logic preservation
+The ratchet (one-way fitness valve) MUST be preserved. The change is *when* and *how* work is scheduled, not the decision logic.
 
-```json
-{
-  "status": "running" | "complete" | "error",
-  "started_at": "<iso8601>",
-  "elapsed_seconds": 1247.3,
-  "current_run": 2,
-  "total_runs": 5,
-  "current_candidate": 3,
-  "candidates_per_run": 5,
-  "current_round": 1,
-  "current_phase": "generating" | "critiquing" | "retrying" | "verifying" | "idle",
-  "passes_so_far": 7,
-  "candidates_completed": 12,
-  "total_candidates": 25,
-  "ratchets_accepted": 4,
-  "ratchets_rejected": 3,
-  "last_event": "retry round 1: 8/9 tests passed (RATCHET)"
-}
-```
+Per-candidate state across phases: each candidate has a "prior-best" round. The retry's prior_code in its prompt is always the prior-best's code. After a retry phase, evaluate each retry: did tests_passed strictly improve over that candidate's prior-best? If yes, retry becomes new prior-best. If no, prior-best stays unchanged. Same logic as today, just batched per phase.
 
-Doesn't have to be atomic-write-perfect — best-effort overwrite is fine. If a write fails, log the error and continue (progress is observability, not correctness).
+## Termination per candidate
+A candidate exits the pipeline (excluded from further phases) when:
+- Its prior-best passes (tests_passed == tests_total).
+- We've done all critic_rounds retries.
+- The most recent critique returned no actionable violations.
+- Code extraction fails on the prior-best.
 
-Update on these events: every candidate completion, every round transition, every critic/retry phase boundary. A few writes per second at peak is fine.
+Track with an "alive" flag per candidate. Phase 2 only critiques alive candidates. Phase 3 only retries candidates with actionable critiques.
 
-On run completion or exception, set `status` to `complete` or `error` and stop updating.
+## Files to change
+- `src/aura_harness/bench/runner.py` — the heart of the refactor. `_resolve_candidate_slot` either gets restructured into phase functions or replaced by a `_resolve_batch_phases` style function. Existing helpers (`_verify_candidate_round`, `_build_reflexion_prompt`, `_read_gradient_report`) should be reusable.
+- Possibly small updates to `CriticClient` if a batch entry point feels cleaner — or just call from a ThreadPoolExecutor without changes.
 
-## Where this goes
-- `src/aura_harness/bench/runner.py` — the print statements and progress.json writes.
-- Probably a small helper class `_ProgressTracker` in the same file that owns the counters and the json path. Keep it private to runner.py; no need for a separate module.
-- Add `--verbose` flag to `bench/__main__.py` to enable the noisy unload prints.
+## Constraints
+- All existing JSONL output fields must be preserved. The `rounds` list per candidate must still contain every round (including ratchet-rejected retries) in chronological order, with the same fields it has today.
+- `unload_model` calls land at phase boundaries, not per-candidate. The per-candidate unload wiring from the earlier dispatch needs to be removed/relocated as part of this refactor.
+- Progress logging continues to work — emit phase-level events like `[run 1/5 phase: critic round 1] critiquing 8 candidates` and per-candidate completion events within phases.
+- Best-effort progress.json updates throughout.
+
+## Performance expectation
+A `--runs 5 --n 5 --critic-rounds 2` run should drop from ~70 min to ~40-50 min. If it doesn't, something's wrong with the phase boundaries or the unload calls.
 
 ## Definition of done
-- A long bench run produces continuous stdout output.
-- `<session_dir>/progress.json` exists and updates during the run.
-- After completion, `progress.json` shows `status: "complete"` and the final stats.
+- `python -m aura_harness.bench --task duplicate_finder --runs 1 --n 3 --critic-rounds 2 --critic-model deepseek-r1:14b` runs to completion.
+- Session JSONL is structurally identical to current output.
+- Pass rates on duplicate_finder remain in the same ballpark as run-000 (76% with critic rounds, ~24% one-shot). Significant deviation is a regression.
 - All 68 existing tests still pass.
 
 ## Out of scope
-- Any UI work. This is stdout + json file only.
-- A separate watch/tail tool. We'll discuss that as a UX question.
-- Restructuring the bench pipeline (batch-mode generation, etc.) — separate dispatch.
-- Changing the JSONL session format — leave that alone.
+- AST splice-back / function-level patches (next dispatch).
+- Critic statefulness across rounds.
+- Adding new bench tasks.
+- Critic transport error retry logic.
 
 Be methodical. Read what you need, make the change, stop. Match existing code style. Type hints everywhere.
