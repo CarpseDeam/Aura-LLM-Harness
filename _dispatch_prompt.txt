@@ -1,60 +1,147 @@
-Task: Backend abstraction
+Task: State schema — module skeleton and design doc
 
-Project context: Aura LLM Harness, a local-first coding harness. Python 3.10+, well-typed, well-documented. Ollama is the only backend today; this task introduces an abstraction so DeepSeek (and any other OpenAI-compatible API) can be plugged in later without touching consumers. This is preparatory plumbing — no new behavior, just refactor.
+Project context: Aura LLM Harness. Previous dispatch added a Backend abstraction (`aura_harness/backend/`). This dispatch lays down the typed state schema that every Station will read from and write to. No Station code yet — just the types, a design doc, and one small piece of behavior (a `RepoMap` builder).
 
 The shape
 
-A new module `aura_harness/backend/` with three files:
+A new module `aura_harness/state/` containing frozen dataclasses. Every type is immutable. No methods beyond what `@dataclass(frozen=True)` gives you, with one exception (the repo-map builder, in its own file). Pure types module — consumers will read these in later dispatches.
 
-- `backend/__init__.py` — exports `Backend`, `CompletionResult`, `BackendError`.
-- `backend/protocol.py` — defines `Backend` as a `typing.Protocol` (or ABC, whichever you find cleaner) with one method:
-  `chat(messages, *, model, temperature=0.2, seed=None, max_tokens=None, response_format=None, reasoning=False) -> CompletionResult`.
-  Also defines `CompletionResult` as a frozen dataclass with fields:
-  `text: str`, `model: str`, `prompt_tokens: int`, `completion_tokens: int`, `total_duration_ms: float`, `raw: dict[str, Any]`.
-  And `BackendError(Exception)` as the unified error type backends raise.
-- `backend/local_ollama.py` — `LocalOllamaBackend` class that wraps an existing `OllamaClient`. Its `chat()` method delegates to `OllamaClient.chat()` and converts the result into the new `CompletionResult` shape (mapping `prompt_eval_count` → `prompt_tokens`, `eval_count` → `completion_tokens`, preserving `total_duration_ms` and `raw`). Catches `OllamaError` and re-raises as `BackendError` to give consumers a stable error type. The `reasoning` and `response_format` params are accepted but no-ops for Ollama for now (document this in the docstring; no warning, just docstring).
+Files
 
-The `Backend` interface is chat-only. There is no `generate()` method — both consumers will be migrated to use `chat()` with a messages list.
+- `state/__init__.py` — re-exports every public type below.
+- `state/types.py` — all the dataclasses listed below.
+- `state/repo_map.py` — `build_repo_map(workspace_path: Path) -> RepoMap`. Walks the workspace with `ast`, produces a `RepoMap`.
 
-Consumer refactors
+Types (in `state/types.py`)
 
-`CriticClient` already uses `chat()`. Refactor it to take `Backend` instead of `OllamaClient`. The internal call changes from `self._client.chat(messages, model=..., temperature=...)` to `self._backend.chat(messages, model=..., temperature=...)`. Update the constructor signature, parameter name, and any internal references. The JSONL logging stays — fields like `prompt_eval_count` in the log record become `prompt_tokens` from the new `CompletionResult`.
+All are `@dataclass(frozen=True)`. Use tuples (not lists) for collection fields so the dataclasses stay hashable and clearly immutable.
 
-`CandidateGenerator` currently uses `client.generate(prompt, system=..., ...)`. Refactor to use `backend.chat(messages, ...)` where messages is built from prompt and optional system: `[{"role": "system", "content": system}, {"role": "user", "content": prompt}]` if system is provided, else `[{"role": "user", "content": prompt}]`. This is a behavior change — the underlying Ollama API call shifts from `/api/generate` to `/api/chat`. Models will see the prompt wrapped in their chat template instead of as a raw completion. `CriticClient` already does this without issue, so the path is tested, but bench numbers may shift slightly within noise.
+```python
+@dataclass(frozen=True)
+class FileSymbols:
+    path: Path
+    symbols: tuple[str, ...]      # top-level def/class names
+    imports: tuple[str, ...]      # module-level imported names
 
-Update the bench runner (`bench/runner.py`) to construct a `LocalOllamaBackend` from its `OllamaClient` and pass the backend to `CriticClient` and `CandidateGenerator`. Same for any other call sites — search the codebase for `CriticClient(` and `CandidateGenerator(` constructors.
+@dataclass(frozen=True)
+class RepoMap:
+    files: tuple[FileSymbols, ...]
 
-File layout summary
+@dataclass(frozen=True)
+class TaskSpec:
+    task_id: str
+    description: str
+    workspace_path: Path
+    constraints: tuple[str, ...] = ()
+    context_files: tuple[Path, ...] = ()
+    repo_map: RepoMap | None = None
 
+@dataclass(frozen=True)
+class SliceContract:
+    expected_symbols: tuple[str, ...] = ()
+    forbidden_imports: tuple[str, ...] = ()
+
+@dataclass(frozen=True)
+class Slice:
+    slice_id: str
+    description: str
+    target_files: tuple[Path, ...]
+    depends_on: tuple[str, ...] = ()
+    contract: SliceContract = SliceContract()
 ```
-src/aura_harness/
-  backend/
-    __init__.py
-    protocol.py       # Backend, CompletionResult, BackendError
-    local_ollama.py   # LocalOllamaBackend(client: OllamaClient)
-  critic/
-    critic_client.py  # constructor takes Backend, not OllamaClient
-  lab/
-    generator.py      # constructor takes Backend, uses chat()
-  bench/
-    runner.py         # builds LocalOllamaBackend, passes to consumers
+
+Plan, CodeArtifact, CritiqueReport carry genealogy fields. The pattern is: every produced thing knows what station and backend made it, when, with what seed, and what state element it consumed (`input_ref`).
+
+```python
+@dataclass(frozen=True)
+class Plan:
+    plan_id: str
+    slices: tuple[Slice, ...]
+    rationale: str
+    # genealogy
+    produced_by_station: str
+    produced_by_backend: str
+    produced_at: datetime
+    seed: int | None
+    input_ref: str   # task_id
+
+@dataclass(frozen=True)
+class FileWrite:
+    path: Path
+    content: str
+
+@dataclass(frozen=True)
+class CodeArtifact:
+    artifact_id: str
+    slice_id: str
+    files: tuple[FileWrite, ...]
+    parent_artifact_ids: tuple[str, ...]   # () for round 0; (prior_id,) for critic retry; (slice0, slice1, ...) for integration
+    critic_round: int                      # 0 for first attempt
+    # genealogy
+    produced_by_station: str
+    produced_by_backend: str
+    produced_at: datetime
+    seed: int | None
+    input_ref: str   # plan_id
+
+@dataclass(frozen=True)
+class CritiqueReport:
+    critique_id: str
+    artifact_id: str
+    passed: bool
+    violations: tuple[str, ...]
+    suggestions: tuple[str, ...]
+    # genealogy
+    produced_by_station: str
+    produced_by_backend: str
+    produced_at: datetime
+    seed: int | None
+    input_ref: str   # artifact_id (matches `artifact_id` above; redundant but consistent with the genealogy pattern)
+
+@dataclass(frozen=True)
+class RunState:
+    run_id: str
+    task: TaskSpec
+    plan: Plan | None = None
+    artifacts: tuple[CodeArtifact, ...] = ()
+    critiques: tuple[CritiqueReport, ...] = ()
 ```
 
-`OllamaClient` itself is unchanged. It stays as the low-level transport that `LocalOllamaBackend` wraps.
+repo_map.py
+
+Single function: `build_repo_map(workspace_path: Path) -> RepoMap`.
+
+Behavior:
+- Walk `workspace_path` recursively, collect every `.py` file. Skip hidden directories (anything starting with `.`), `__pycache__`, `.venv`, `node_modules`, `.git`.
+- For each file, read it and run `ast.parse`. On `SyntaxError`, skip the file (it might be a partial work-in-progress); don't raise. Log a debug-level message.
+- Top-level symbols: walk the module body, collect names of `FunctionDef`, `AsyncFunctionDef`, `ClassDef` nodes at module scope only (not nested).
+- Imports: walk the module body, collect `Import` and `ImportFrom` nodes at module scope. For `Import`, the name is the imported module (`import foo.bar` → `"foo.bar"`). For `ImportFrom`, prefix with the module (`from foo import bar` → `"foo.bar"`; `from foo import bar, baz` → `"foo.bar"`, `"foo.baz"`). For relative imports (`from . import x`), use `.x` style — keep them in but mark them recognizable.
+- Paths in `FileSymbols.path` are relative to `workspace_path` (use `Path.relative_to`).
+- Sort `FileSymbols` by path so the output is deterministic. Sort `symbols` and `imports` within each file too.
+
+Design doc
+
+`docs/STATE_SCHEMA.md`. Prose, not just code dumps. Sections:
+
+1. **Why this schema exists.** Two paragraphs: stations need a typed object to pass around; immutability + genealogy fields are what make it not a toy. State is what the architecture is built on.
+2. **The types.** One subsection per type. For each: what it represents, what produces it, what consumes it, and a short fenced code block showing the dataclass. Don't repeat the full code from `types.py` — just the field list and comments.
+3. **Genealogy.** Why every produced thing carries `produced_by_station`, `produced_by_backend`, `produced_at`, `seed`, `input_ref`. A worked example: trace a single CritiqueReport back to its CodeArtifact back to its Plan back to its TaskSpec.
+4. **The `parent_artifact_ids` pattern.** Why it's a tuple. Three cases — round 0 (empty), critic retry (one parent), integration (many parents). Tiny ASCII diagram if it helps.
+5. **What's deferred.** Note that `prompt_version` was considered and punted; will be added when prompt regression tracking earns its place. Same for `IntegrationReport` as a separate type — currently folded into `CodeArtifact` via `parent_artifact_ids`.
+6. **The repo map.** What it is, what fills it (`build_repo_map`), what reads it (the planner, eventually). Why AST and not tree-sitter for now (multi-language support is a future concern; AST is stdlib and enough for Python).
 
 Definition of done
 
-- `aura_harness/backend/` module exists with the three files above.
-- `CriticClient` and `CandidateGenerator` constructors take `Backend`.
-- `bench/runner.py` constructs a `LocalOllamaBackend` and passes it to consumers.
-- `python -m aura_harness.bench --task duplicate_finder --runs 3 --n 3 --model qwen2.5-coder:7b --critic-rounds 2` produces a session under `sessions/`. Pass rate is in the same range as the prior 7B+critic runs (~76% historical). Some drift within noise is acceptable; a dramatic shift means the chat-shape conversion broke something and we debug.
-- Existing tests in `tests/` still pass.
-- mypy and the project linter stay clean.
+- `aura_harness/state/` module exists with the three files.
+- All types are frozen dataclasses, all collection fields are tuples.
+- `build_repo_map` works on the project's own `src/` directory: `build_repo_map(Path("src/aura_harness"))` returns a non-empty RepoMap with sensible symbols and imports for at least `backend/protocol.py`, `critic/critic_client.py`, `lab/generator.py`.
+- `docs/STATE_SCHEMA.md` exists with the six sections above. Real prose, not stub headers.
+- `python -c "from aura_harness.state import RunState, TaskSpec, Plan, Slice, SliceContract, CodeArtifact, CritiqueReport, RepoMap, build_repo_map"` succeeds.
+- Existing tests still pass.
+- mypy clean on the new module.
 
 Notes
 
-The `reasoning` and `response_format` params on `Backend.chat()` are forward-looking — they exist in the signature so the cloud backend (next dispatch) doesn't need to change the protocol when it adds DeepSeek's thinking mode and JSON mode. For the Ollama backend they're accepted and ignored, document this clearly in the LocalOllamaBackend docstring.
-
-Don't use the `openai` SDK for the Ollama backend even though Ollama exposes an OpenAI-compat endpoint — keep wrapping the existing `OllamaClient` so its `/api/chat` and JSONL logging stay intact and the regression check is meaningful. The cloud backend in the next dispatch will use `openai`.
+No Station code in this dispatch. No serialization helpers (json/dict round-trip) — punt those until they're needed. Don't add any methods to the dataclasses; if a derived view is needed later, it lives outside the type. The `state` module is types-and-one-builder, nothing else.
 
 Make the change described. The dispatch names the files that matter — work those, then stop. Match existing style; type hints everywhere.
