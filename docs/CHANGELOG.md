@@ -2,6 +2,8 @@
 
 All notable changes to this project.
 
+- 2026-05-02: refactor: introduce generic `Backend` abstraction for LLM providers, transitioning from direct `OllamaClient` usage.
+- 2026-05-02: refactor: rename token usage fields from `prompt_eval_count`/`eval_count` to `prompt_tokens`/`completion_tokens` and `num_predict` to `max_tokens` for provider neutrality.
 - 2026-04-30: refactor: restructure Benchmark Runner to use phase-based orchestration, reducing model swap overhead and enabling parallel critic calls.
 - 2026-04-30: feat: thread failure context (gradient, failed tests, stderr) into CriticClient for focused reflexion reviews.
 - 2026-04-30: feat: add stdout progress logging and real-time `progress.json` updates to the Benchmark Runner.

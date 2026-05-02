@@ -1,5 +1,32 @@
 # API Reference
 
+## `aura_harness.backend`
+
+### `Backend` (Protocol)
+
+Provider-agnostic chat backend protocol.
+
+- `default_model`: (read-only) Model name used when callers do not pin one explicitly.
+- `chat(messages, model, temperature=0.2, seed=None, max_tokens=None, ...)`: Runs a non-streaming chat completion and returns a `CompletionResult`.
+
+### `LocalOllamaBackend`
+
+Implementation of `Backend` backed by a local Ollama server.
+
+- `__init__(client: OllamaClient)`: Wraps an existing `OllamaClient`.
+- `client`: (read-only) Access to the underlying `OllamaClient`.
+
+### `CompletionResult`
+
+Unified shape for chat completion results.
+
+- `text`: Assistant message content.
+- `model`: Name of the model that produced the text.
+- `prompt_tokens`: Tokens in the prompt.
+- `completion_tokens`: Tokens in the completion.
+- `total_duration_ms`: Wall-clock duration of the call.
+- `raw`: Provider's raw response payload.
+
 ## `aura_harness.llm`
 
 ### `OllamaClient`
@@ -39,6 +66,13 @@ A collection of candidates from a single prompt.
 - `candidates`: List of `Candidate` objects.
 - `success_count`: Number of successful candidates.
 - `total_wall_duration_ms`: Time taken for the whole batch.
+
+### `CandidateGenerator`
+
+Orchestrates parallel generation calls.
+
+- `__init__(backend: Backend, max_workers: int = 5, log_path: Path | None = None)`: Initializes the generator with a backend.
+- `generate(prompt: str, n: int, model: str | None = None, system: str | None = None, ...)`: Fans out `n` parallel chat calls.
 
 ## `aura_harness.workspace`
 
@@ -88,8 +122,8 @@ Structured review of a candidate.
 ### `CriticClient`
 
 Stateless service for reviewing code.
-- `__init__(client: OllamaClient, model: str = DEFAULT_CRITIC_MODEL)`: Initializes the critic.
-- `review(spec: str, code: str, *, failures: tuple[str, ...] = (), verifier_stderr: str | None = None, tests_passed: int | None = None, tests_total: int | None = None) -> Critique`: Reviews the code against the spec, optionally using failure context (failed tests, verifier stderr, and gradient signal) to provide focused feedback. Returns a critique.
+- `__init__(backend: Backend, model: str = DEFAULT_CRITIC_MODEL)`: Initializes the critic with a backend.
+- `review(spec: str, code: str, ...)`: Reviews the code against the spec.
 
 ## `aura_harness.ui`
 

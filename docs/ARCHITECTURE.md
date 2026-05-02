@@ -2,18 +2,20 @@
 
 ## Component Overview
 
+- **`Backend`**: Abstract protocol for LLM providers. Defines a standard `chat()` method and provides provider-neutral metadata such as `default_model` and token usage metrics.
+- **`LocalOllamaBackend`**: Implementation of `Backend` that wraps `OllamaClient` to provide local LLM capabilities via Ollama.
 - **`OllamaClient`**: Low-level client for interacting with the Ollama API. Manages defaults such as the `default_model`. Supports both completion and chat endpoints, as well as explicit model unloading to manage VRAM.
-- **`PlannerClient`**: Stateless service for managing conversational interactions with a planner model.
-- **`CandidateGenerator` (the "lab")**: Orchestrates multiple parallel calls to `OllamaClient` to generate multiple candidates for a single prompt.
+- **`PlannerClient`**: Stateless service for managing conversational interactions with a planner model. Backed by a `:class:Backend`.
+- **`CandidateGenerator` (the "lab")**: Orchestrates multiple parallel calls to a `:class:Backend` to generate multiple candidates for a single prompt.
 - **`MainWindow` (UI)**: The main graphical interface, providing controls for model selection, workspace management, candidate count (N), and prompt submission.
 - **`PlannerWidget` (UI)**: A conversational interface for interacting with the `PlannerClient` to refine a project specification before generation.
 - **`WorkspaceManager`**: Manages a local directory for file operations. Provides file listing, reading (for context injection), and writing (for applying candidates).
 - **`Scaffold Layer`**: Provides templates and logic to bootstrap new projects. Includes `scaffold()` function and `Template` definitions.
 - **`BatchWorker` (UI Threading)**: A `QThread` that handles the execution of the `CandidateGenerator` and optional `Scorer` off the main GUI thread.
 - **`PlannerWorker`** (UI Threading): A `QThread` that handles asynchronous calls to the `PlannerClient`.
-- **`CriticClient`**: Stateless service that reviews generated code against a specification. Produces structured critiques (violations and suggestions) using a reasoning model.
+- **`CriticClient`**: Stateless service that reviews generated code against a specification. Produces structured critiques (violations and suggestions) using a reasoning model via a `:class:Backend`.
 - **Benchmark Harness**:
-    - **`Runner`**: Orchestrates generation against a task spec, optionally invokes the `CriticClient` for reflexion, and invokes a standalone `verify.py` script for each candidate.
+    - **`Runner`**: Orchestrates generation against a task spec, optionally invokes the `CriticClient` for reflexion, and invokes a standalone `verify.py` script for each candidate. Uses `LocalOllamaBackend` for execution.
     - **Session Manager**: Manages session-specific directories and persists configuration, raw batches, and aggregate summaries.
 
 - **Scoring Layer**:
@@ -32,7 +34,7 @@
     - `MainWindow` reads selected files via `WorkspaceManager` and prepends them to the prompt.
     - `MainWindow` constructs and starts a `BatchWorker`, optionally passing a `ValidationSpec`.
     - `BatchWorker` calls `CandidateGenerator.generate()`.
-    - `CandidateGenerator` uses `OllamaClient` to fetch completions.
+    - `CandidateGenerator` uses a `Backend` (e.g., `LocalOllamaBackend`) to fetch completions.
 3. **Validation & Application**:
     - If a `ValidationSpec` was provided, `BatchWorker` calls `score_batch()` on the results.
     - Results (raw or scored) are returned to `MainWindow` via signals and rendered as interactive widgets.
