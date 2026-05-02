@@ -215,7 +215,7 @@ carries the same five fields:
 - `produced_by_station`: which station emitted it (`"planner"`,
   `"coder"`, `"critic"`, `"integrator"`, ...).
 - `produced_by_backend`: which backend served the model call
-  (`"local-ollama"`, `"openai-deepseek"`, ...). This is separate from
+  (`"local_ollama"`, `"openai-deepseek"`, ...). This is separate from
   the model name on purpose; a station can change models without
   changing backends, and a backend can swap models internally.
 - `produced_at`: UTC timestamp of emission.

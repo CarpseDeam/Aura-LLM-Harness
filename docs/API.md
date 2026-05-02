@@ -6,6 +6,7 @@
 
 Provider-agnostic chat backend protocol.
 
+- `name`: (read-only) Stable backend identifier used for genealogy stamping.
 - `default_model`: (read-only) Model name used when callers do not pin one explicitly.
 - `chat(messages, model, temperature=0.2, seed=None, max_tokens=None, ...)`: Runs a non-streaming chat completion and returns a `CompletionResult`.
 
@@ -14,6 +15,7 @@ Provider-agnostic chat backend protocol.
 Implementation of `Backend` backed by a local Ollama server.
 
 - `__init__(client: OllamaClient)`: Wraps an existing `OllamaClient`.
+- `name`: Returns "local_ollama".
 - `client`: (read-only) Access to the underlying `OllamaClient`.
 
 ### `CompletionResult`
@@ -369,4 +371,36 @@ Aggregate results for a session.
 ### Functions
 
 - `run_bench(task: str, runs: int, n: int, model: str, *, timeout_seconds: float, critic_rounds: int, critic_model: str, verbose: bool = False, ...) -> tuple[Path, SessionSummary]`: Executes a benchmark session and returns the session directory and summary.
+
+## `aura_harness.stations`
+
+### `Station` (ABC)
+
+Abstract base class for functional units.
+
+- `name`: (read-only) The name of the station.
+- `backend`: (read-only) The `Backend` used by the station.
+
+### `CriticStation`
+
+Wraps `CriticClient` to produce `CritiqueReport` objects.
+
+- `__init__(name: str = "critic", backend: Backend, client: CriticClient)`: Initializes the station.
+- `run(artifact: CodeArtifact, slice: Slice) -> CritiqueReport`: Reviews an artifact and returns a report.
+
+### `WorkerStation`
+
+Orchestrates candidate generation and reflexion.
+
+- `__init__(name: str = "worker", backend: Backend, generator: CandidateGenerator, critic: CriticStation, max_critic_rounds: int)`: Initializes the station.
+- `run(slice: Slice, state: RunState) -> CodeArtifact`: Runs the reflexion loop and returns the final artifact.
+
+## `aura_harness.pipeline`
+
+### `LinearExecutor`
+
+Executes a `Plan` sequentially.
+
+- `__init__(worker: WorkerStation, integrator: IntegratorStation | None = None)`: Initializes the executor.
+- `run(state: RunState, plan: Plan) -> RunState`: Iterates through slices and updates the state.
 
