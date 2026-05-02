@@ -4,6 +4,7 @@
 
 - **`Backend`**: Abstract protocol for LLM providers. Defines a standard `chat()` method and provides provider-neutral metadata such as `default_model` and token usage metrics.
 - **`LocalOllamaBackend`**: Implementation of `Backend` that wraps `OllamaClient` to provide local LLM capabilities via Ollama.
+- **`State Module` (`aura_harness.state`)**: Provides a typed, immutable schema for the system state (`RunState`, `Plan`, `CodeArtifact`, etc.). Includes a `RepoMap` builder that uses AST parsing to map workspace symbols.
 - **`OllamaClient`**: Low-level client for interacting with the Ollama API. Manages defaults such as the `default_model`. Supports both completion and chat endpoints, as well as explicit model unloading to manage VRAM.
 - **`PlannerClient`**: Stateless service for managing conversational interactions with a planner model. Backed by a `:class:Backend`.
 - **`CandidateGenerator` (the "lab")**: Orchestrates multiple parallel calls to a `:class:Backend` to generate multiple candidates for a single prompt.

@@ -27,6 +27,85 @@ Unified shape for chat completion results.
 - `total_duration_ms`: Wall-clock duration of the call.
 - `raw`: Provider's raw response payload.
 
+## `aura_harness.state`
+
+Typed, immutable schema for the system state. All dataclasses are frozen.
+
+### `RepoMap`
+A map of symbols and imports across the workspace.
+- `files`: Tuple of `FileSymbols`.
+
+### `FileSymbols`
+Symbols found in a single file.
+- `path`: Path relative to workspace root.
+- `symbols`: Tuple of top-level function and class names.
+- `imports`: Tuple of imported module names.
+
+### `TaskSpec`
+The initial requirement for a run.
+- `task_id`: Unique identifier.
+- `description`: The goal of the task.
+- `workspace_path`: Root of the target project.
+- `constraints`: Optional tuple of constraints.
+- `context_files`: Optional tuple of paths to relevant files.
+- `repo_map`: Optional `RepoMap` of the workspace.
+
+### `Plan`
+A strategy to fulfill a `TaskSpec`, produced by a Planner station.
+- `plan_id`: Unique identifier.
+- `slices`: Tuple of `Slice` objects.
+- `rationale`: Explanation of the strategy.
+- `produced_by_station`: Station name.
+- `produced_by_backend`: Backend name.
+- `produced_at`: Timestamp.
+- `seed`: Random seed used.
+- `input_ref`: ID of the input (task_id).
+
+### `Slice`
+A discrete unit of work within a `Plan`.
+- `slice_id`: Unique identifier.
+- `description`: What this slice implements.
+- `target_files`: Files this slice modifies or creates.
+- `depends_on`: IDs of slices that must be completed first.
+- `contract`: `SliceContract` defining expected outcome.
+
+### `CodeArtifact`
+The result of executing a `Slice`, produced by a Coder station.
+- `artifact_id`: Unique identifier.
+- `slice_id`: ID of the slice being implemented.
+- `files`: Tuple of `FileWrite` objects.
+- `parent_artifact_ids`: Tuple of IDs this artifact builds upon.
+- `critic_round`: Iteration number (0 for first attempt).
+- `produced_by_station`: Station name.
+- `produced_by_backend`: Backend name.
+- `produced_at`: Timestamp.
+- `seed`: Random seed used.
+- `input_ref`: ID of the input (plan_id).
+
+### `CritiqueReport`
+A review of a `CodeArtifact`, produced by a Critic station.
+- `critique_id`: Unique identifier.
+- `artifact_id`: ID of the artifact being reviewed.
+- `passed`: Boolean indicating if the artifact is acceptable.
+- `violations`: Tuple of contract violations.
+- `suggestions`: Tuple of suggested fixes.
+- `produced_by_station`: Station name.
+- `produced_by_backend`: Backend name.
+- `produced_at`: Timestamp.
+- `seed`: Random seed used.
+- `input_ref`: ID of the input (artifact_id).
+
+### `RunState`
+The root container for a full session state.
+- `run_id`: Unique identifier.
+- `task`: The `TaskSpec`.
+- `plan`: The active `Plan` (if any).
+- `artifacts`: Tuple of all `CodeArtifacts` produced.
+- `critiques`: Tuple of all `CritiqueReports` produced.
+
+### Functions
+- `build_repo_map(workspace_path: Path) -> RepoMap`: Walks the workspace and uses AST parsing to extract symbols and imports.
+
 ## `aura_harness.llm`
 
 ### `OllamaClient`
