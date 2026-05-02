@@ -1,0 +1,60 @@
+Task: Backend abstraction
+
+Project context: Aura LLM Harness, a local-first coding harness. Python 3.10+, well-typed, well-documented. Ollama is the only backend today; this task introduces an abstraction so DeepSeek (and any other OpenAI-compatible API) can be plugged in later without touching consumers. This is preparatory plumbing — no new behavior, just refactor.
+
+The shape
+
+A new module `aura_harness/backend/` with three files:
+
+- `backend/__init__.py` — exports `Backend`, `CompletionResult`, `BackendError`.
+- `backend/protocol.py` — defines `Backend` as a `typing.Protocol` (or ABC, whichever you find cleaner) with one method:
+  `chat(messages, *, model, temperature=0.2, seed=None, max_tokens=None, response_format=None, reasoning=False) -> CompletionResult`.
+  Also defines `CompletionResult` as a frozen dataclass with fields:
+  `text: str`, `model: str`, `prompt_tokens: int`, `completion_tokens: int`, `total_duration_ms: float`, `raw: dict[str, Any]`.
+  And `BackendError(Exception)` as the unified error type backends raise.
+- `backend/local_ollama.py` — `LocalOllamaBackend` class that wraps an existing `OllamaClient`. Its `chat()` method delegates to `OllamaClient.chat()` and converts the result into the new `CompletionResult` shape (mapping `prompt_eval_count` → `prompt_tokens`, `eval_count` → `completion_tokens`, preserving `total_duration_ms` and `raw`). Catches `OllamaError` and re-raises as `BackendError` to give consumers a stable error type. The `reasoning` and `response_format` params are accepted but no-ops for Ollama for now (document this in the docstring; no warning, just docstring).
+
+The `Backend` interface is chat-only. There is no `generate()` method — both consumers will be migrated to use `chat()` with a messages list.
+
+Consumer refactors
+
+`CriticClient` already uses `chat()`. Refactor it to take `Backend` instead of `OllamaClient`. The internal call changes from `self._client.chat(messages, model=..., temperature=...)` to `self._backend.chat(messages, model=..., temperature=...)`. Update the constructor signature, parameter name, and any internal references. The JSONL logging stays — fields like `prompt_eval_count` in the log record become `prompt_tokens` from the new `CompletionResult`.
+
+`CandidateGenerator` currently uses `client.generate(prompt, system=..., ...)`. Refactor to use `backend.chat(messages, ...)` where messages is built from prompt and optional system: `[{"role": "system", "content": system}, {"role": "user", "content": prompt}]` if system is provided, else `[{"role": "user", "content": prompt}]`. This is a behavior change — the underlying Ollama API call shifts from `/api/generate` to `/api/chat`. Models will see the prompt wrapped in their chat template instead of as a raw completion. `CriticClient` already does this without issue, so the path is tested, but bench numbers may shift slightly within noise.
+
+Update the bench runner (`bench/runner.py`) to construct a `LocalOllamaBackend` from its `OllamaClient` and pass the backend to `CriticClient` and `CandidateGenerator`. Same for any other call sites — search the codebase for `CriticClient(` and `CandidateGenerator(` constructors.
+
+File layout summary
+
+```
+src/aura_harness/
+  backend/
+    __init__.py
+    protocol.py       # Backend, CompletionResult, BackendError
+    local_ollama.py   # LocalOllamaBackend(client: OllamaClient)
+  critic/
+    critic_client.py  # constructor takes Backend, not OllamaClient
+  lab/
+    generator.py      # constructor takes Backend, uses chat()
+  bench/
+    runner.py         # builds LocalOllamaBackend, passes to consumers
+```
+
+`OllamaClient` itself is unchanged. It stays as the low-level transport that `LocalOllamaBackend` wraps.
+
+Definition of done
+
+- `aura_harness/backend/` module exists with the three files above.
+- `CriticClient` and `CandidateGenerator` constructors take `Backend`.
+- `bench/runner.py` constructs a `LocalOllamaBackend` and passes it to consumers.
+- `python -m aura_harness.bench --task duplicate_finder --runs 3 --n 3 --model qwen2.5-coder:7b --critic-rounds 2` produces a session under `sessions/`. Pass rate is in the same range as the prior 7B+critic runs (~76% historical). Some drift within noise is acceptable; a dramatic shift means the chat-shape conversion broke something and we debug.
+- Existing tests in `tests/` still pass.
+- mypy and the project linter stay clean.
+
+Notes
+
+The `reasoning` and `response_format` params on `Backend.chat()` are forward-looking — they exist in the signature so the cloud backend (next dispatch) doesn't need to change the protocol when it adds DeepSeek's thinking mode and JSON mode. For the Ollama backend they're accepted and ignored, document this clearly in the LocalOllamaBackend docstring.
+
+Don't use the `openai` SDK for the Ollama backend even though Ollama exposes an OpenAI-compat endpoint — keep wrapping the existing `OllamaClient` so its `/api/chat` and JSONL logging stay intact and the regression check is meaningful. The cloud backend in the next dispatch will use `openai`.
+
+Make the change described. The dispatch names the files that matter — work those, then stop. Match existing style; type hints everywhere.

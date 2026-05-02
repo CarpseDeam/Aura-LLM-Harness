@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from aura_harness.backend import LocalOllamaBackend
 from aura_harness.lab.generator import CandidateGenerator
 from aura_harness.lab.models import CandidateBatch
 from aura_harness.llm import OllamaClient
@@ -54,7 +55,8 @@ def _print_batch(batch: CandidateBatch) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     client = OllamaClient(default_model=args.model)
-    generator = CandidateGenerator(client)
+    backend = LocalOllamaBackend(client)
+    generator = CandidateGenerator(backend)
 
     batch = generator.generate(
         args.prompt,

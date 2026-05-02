@@ -12,8 +12,8 @@ from unittest.mock import MagicMock
 import pytest
 
 import aura_harness.scoring.__main__ as cli
+from aura_harness.backend import CompletionResult
 from aura_harness.lab.models import Candidate, CandidateBatch
-from aura_harness.llm import CompletionResult
 from aura_harness.scoring.models import (
     ScoredBatch,
     ScoredCandidate,
@@ -35,8 +35,8 @@ def _stub_main_pipeline(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         result = CompletionResult(
             text="```python\ndef add(a, b):\n    return a + b\n```",
             model="test-model",
-            prompt_eval_count=1,
-            eval_count=1,
+            prompt_tokens=1,
+            completion_tokens=1,
             total_duration_ms=1.0,
             raw={},
         )

@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Final
 
+from aura_harness.backend import LocalOllamaBackend
 from aura_harness.lab.generator import CandidateGenerator
 from aura_harness.llm import OllamaClient
 from aura_harness.scoring.models import ScoredBatch, ScoredCandidate, ValidationSpec
@@ -117,7 +118,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {err}", file=sys.stderr)
         return _EXIT_USAGE_ERROR
     client = OllamaClient(default_model=args.model) if args.model else OllamaClient()
-    generator = CandidateGenerator(client)
+    backend = LocalOllamaBackend(client)
+    generator = CandidateGenerator(backend)
     batch = generator.generate(
         args.prompt,
         n=args.n,

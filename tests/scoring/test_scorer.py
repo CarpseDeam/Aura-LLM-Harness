@@ -1,8 +1,8 @@
 """Tests for the batch scorer."""
 from __future__ import annotations
 
+from aura_harness.backend import CompletionResult
 from aura_harness.lab.models import Candidate, CandidateBatch
-from aura_harness.llm import CompletionResult
 from aura_harness.scoring.models import ValidationSpec
 from aura_harness.scoring.scorer import score_batch
 
@@ -13,8 +13,8 @@ def _make_candidate(index: int, *, text: str | None = None, error: str | None = 
         result = CompletionResult(
             text=text,
             model="test-model",
-            prompt_eval_count=1,
-            eval_count=1,
+            prompt_tokens=1,
+            completion_tokens=1,
             total_duration_ms=1.0,
             raw={"response": text},
         )

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from aura_harness.llm import CompletionResult
+from aura_harness.backend import CompletionResult
 
 
 @dataclass(frozen=True)

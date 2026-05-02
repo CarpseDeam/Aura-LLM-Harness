@@ -9,26 +9,26 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from aura_harness.backend import Backend, BackendError, CompletionResult
 from aura_harness.lab.generator import CandidateGenerator
 from aura_harness.lab.models import Candidate, CandidateBatch
-from aura_harness.llm import CompletionResult, OllamaClient, OllamaError
 
 
 def _make_result(text: str = "ok", model: str = "test-model") -> CompletionResult:
     return CompletionResult(
         text=text,
         model=model,
-        prompt_eval_count=1,
-        eval_count=1,
+        prompt_tokens=1,
+        completion_tokens=1,
         total_duration_ms=1.0,
         raw={"response": text},
     )
 
 
-def _mock_client(default_model: str = "test-model") -> MagicMock:
-    client = MagicMock(spec=OllamaClient)
-    client.default_model = default_model
-    return client
+def _mock_backend(default_model: str = "test-model") -> MagicMock:
+    backend = MagicMock(spec=Backend)
+    backend.default_model = default_model
+    return backend
 
 
 @pytest.fixture
@@ -37,9 +37,9 @@ def log_path(tmp_path: Path) -> Path:
 
 
 def test_generate_returns_n_candidates_with_seeds(log_path: Path) -> None:
-    client = _mock_client()
-    client.generate.return_value = _make_result()
-    gen = CandidateGenerator(client, log_path=log_path)
+    backend = _mock_backend()
+    backend.chat.return_value = _make_result()
+    gen = CandidateGenerator(backend, log_path=log_path)
 
     batch = gen.generate("hello", n=5, base_seed=100)
 
@@ -54,9 +54,9 @@ def test_generate_returns_n_candidates_with_seeds(log_path: Path) -> None:
 
 
 def test_generate_passes_through_call_arguments(log_path: Path) -> None:
-    client = _mock_client(default_model="default-m")
-    client.generate.return_value = _make_result()
-    gen = CandidateGenerator(client, log_path=log_path)
+    backend = _mock_backend(default_model="default-m")
+    backend.chat.return_value = _make_result()
+    gen = CandidateGenerator(backend, log_path=log_path)
 
     gen.generate(
         "p",
@@ -68,29 +68,45 @@ def test_generate_passes_through_call_arguments(log_path: Path) -> None:
         num_predict=64,
     )
 
-    assert client.generate.call_count == 3
+    assert backend.chat.call_count == 3
     seen_seeds: list[int] = []
-    for call in client.generate.call_args_list:
+    expected_messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "p"},
+    ]
+    for call in backend.chat.call_args_list:
         args, kwargs = call
-        assert args == ("p",)
+        assert args == (expected_messages,)
         assert kwargs["model"] == "override-m"
-        assert kwargs["system"] == "sys"
         assert kwargs["temperature"] == 0.9
-        assert kwargs["num_predict"] == 64
+        assert kwargs["max_tokens"] == 64
         seen_seeds.append(kwargs["seed"])
     assert sorted(seen_seeds) == [10, 11, 12]
 
 
-def test_one_failure_does_not_break_batch(log_path: Path) -> None:
-    client = _mock_client()
+def test_generate_omits_system_when_none(log_path: Path) -> None:
+    backend = _mock_backend()
+    backend.chat.return_value = _make_result()
+    gen = CandidateGenerator(backend, log_path=log_path)
 
-    def side_effect(prompt: str, **kwargs: Any) -> CompletionResult:
+    gen.generate("just-user", n=2, base_seed=0)
+
+    assert backend.chat.call_count == 2
+    for call in backend.chat.call_args_list:
+        (messages,), _kwargs = call
+        assert messages == [{"role": "user", "content": "just-user"}]
+
+
+def test_one_failure_does_not_break_batch(log_path: Path) -> None:
+    backend = _mock_backend()
+
+    def side_effect(messages: list[dict[str, str]], **kwargs: Any) -> CompletionResult:
         if kwargs["seed"] == 2:
-            raise OllamaError("simulated failure")
+            raise BackendError("simulated failure")
         return _make_result(text=f"seed={kwargs['seed']}")
 
-    client.generate.side_effect = side_effect
-    gen = CandidateGenerator(client, log_path=log_path)
+    backend.chat.side_effect = side_effect
+    gen = CandidateGenerator(backend, log_path=log_path)
 
     batch = gen.generate("p", n=5, base_seed=0)
 
@@ -107,9 +123,9 @@ def test_one_failure_does_not_break_batch(log_path: Path) -> None:
 
 
 def test_all_failures_no_propagation(log_path: Path) -> None:
-    client = _mock_client()
-    client.generate.side_effect = OllamaError("nope")
-    gen = CandidateGenerator(client, log_path=log_path)
+    backend = _mock_backend()
+    backend.chat.side_effect = BackendError("nope")
+    gen = CandidateGenerator(backend, log_path=log_path)
 
     batch = gen.generate("p", n=5, base_seed=0)
 
@@ -121,14 +137,14 @@ def test_all_failures_no_propagation(log_path: Path) -> None:
 
 def test_total_wall_duration_is_reasonable(log_path: Path) -> None:
     sleep_s = 0.05
-    client = _mock_client()
+    backend = _mock_backend()
 
-    def side_effect(prompt: str, **kwargs: Any) -> CompletionResult:
+    def side_effect(messages: list[dict[str, str]], **kwargs: Any) -> CompletionResult:
         time.sleep(sleep_s)
         return _make_result()
 
-    client.generate.side_effect = side_effect
-    gen = CandidateGenerator(client, max_workers=5, log_path=log_path)
+    backend.chat.side_effect = side_effect
+    gen = CandidateGenerator(backend, max_workers=5, log_path=log_path)
 
     batch = gen.generate("p", n=5, base_seed=0)
 
@@ -142,16 +158,16 @@ def test_total_wall_duration_is_reasonable(log_path: Path) -> None:
 
 def test_candidates_ordered_by_index_when_completion_order_differs(log_path: Path) -> None:
     """Slowest seed completes first via inverted delays; ordering must hold."""
-    client = _mock_client()
+    backend = _mock_backend()
 
-    def side_effect(prompt: str, **kwargs: Any) -> CompletionResult:
+    def side_effect(messages: list[dict[str, str]], **kwargs: Any) -> CompletionResult:
         # earlier indices sleep longer → finish later
         delay = (5 - (kwargs["seed"] - 100)) * 0.02
         time.sleep(delay)
         return _make_result(text=f"seed={kwargs['seed']}")
 
-    client.generate.side_effect = side_effect
-    gen = CandidateGenerator(client, max_workers=5, log_path=log_path)
+    backend.chat.side_effect = side_effect
+    gen = CandidateGenerator(backend, max_workers=5, log_path=log_path)
 
     batch = gen.generate("p", n=5, base_seed=100)
 
@@ -167,9 +183,9 @@ def test_candidates_ordered_by_index_when_completion_order_differs(log_path: Pat
 
 
 def test_batch_summary_appended_to_log(log_path: Path) -> None:
-    client = _mock_client(default_model="m1")
-    client.generate.return_value = _make_result()
-    gen = CandidateGenerator(client, log_path=log_path)
+    backend = _mock_backend(default_model="m1")
+    backend.chat.return_value = _make_result()
+    gen = CandidateGenerator(backend, log_path=log_path)
 
     batch = gen.generate("a long prompt about debugging", n=3, base_seed=7)
 
@@ -191,9 +207,9 @@ def test_batch_summary_appended_to_log(log_path: Path) -> None:
 def test_log_directory_auto_created(tmp_path: Path) -> None:
     nested = tmp_path / "deep" / "dir" / "batches.jsonl"
     assert not nested.parent.exists()
-    client = _mock_client()
-    client.generate.return_value = _make_result()
-    gen = CandidateGenerator(client, log_path=nested)
+    backend = _mock_backend()
+    backend.chat.return_value = _make_result()
+    gen = CandidateGenerator(backend, log_path=nested)
 
     gen.generate("p", n=2, base_seed=0)
 
@@ -202,21 +218,21 @@ def test_log_directory_auto_created(tmp_path: Path) -> None:
 
 
 def test_n_must_be_at_least_one(log_path: Path) -> None:
-    gen = CandidateGenerator(_mock_client(), log_path=log_path)
+    gen = CandidateGenerator(_mock_backend(), log_path=log_path)
     with pytest.raises(ValueError):
         gen.generate("p", n=0)
 
 
-def test_default_model_falls_back_to_client(log_path: Path) -> None:
-    client = _mock_client(default_model="client-default")
-    client.generate.return_value = _make_result(model="client-default")
-    gen = CandidateGenerator(client, log_path=log_path)
+def test_default_model_falls_back_to_backend(log_path: Path) -> None:
+    backend = _mock_backend(default_model="backend-default")
+    backend.chat.return_value = _make_result(model="backend-default")
+    gen = CandidateGenerator(backend, log_path=log_path)
 
     batch = gen.generate("p", n=2, base_seed=0)
 
-    assert batch.model == "client-default"
-    for call in client.generate.call_args_list:
-        assert call.kwargs["model"] == "client-default"
+    assert batch.model == "backend-default"
+    for call in backend.chat.call_args_list:
+        assert call.kwargs["model"] == "backend-default"
 
 
 def test_candidate_text_property_handles_failure() -> None:

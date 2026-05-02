@@ -38,6 +38,7 @@ from aura_harness.bench.models import (
     RunResult,
     SessionSummary,
 )
+from aura_harness.backend import LocalOllamaBackend
 from aura_harness.bench.session import (
     create_session_dir,
     write_batch,
@@ -404,9 +405,10 @@ def run_bench(
     tracker.session_started()
 
     client = OllamaClient(default_model=model)
-    generator = CandidateGenerator(client)
+    backend = LocalOllamaBackend(client)
+    generator = CandidateGenerator(backend)
     critic: CriticClient | None = (
-        CriticClient(client, model=critic_model) if critic_rounds > 0 else None
+        CriticClient(backend, model=critic_model) if critic_rounds > 0 else None
     )
 
     run_results: list[RunResult] = []

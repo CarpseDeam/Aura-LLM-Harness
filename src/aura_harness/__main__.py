@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
+from aura_harness.backend import LocalOllamaBackend
 from aura_harness.lab import CandidateGenerator
 from aura_harness.llm import OllamaClient
 from aura_harness.planner import PlannerClient
@@ -31,7 +32,8 @@ def main() -> int:
     )
     app = QApplication(sys.argv)
     client = OllamaClient()
-    generator = CandidateGenerator(client)
+    backend = LocalOllamaBackend(client)
+    generator = CandidateGenerator(backend)
     planner = PlannerClient(client)
     workspace = _bootstrap_workspace(Path.cwd() / "workspace")
     window = MainWindow(client, generator, workspace, planner)

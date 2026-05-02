@@ -1,4 +1,4 @@
-"""Stateless critic service backed by a local reasoning model via Ollama.
+"""Stateless critic service backed by a reasoning-capable :class:`Backend`.
 
 Given a task spec and a candidate's code, :class:`CriticClient` asks the
 reasoning model for a structured contract review and returns a
@@ -15,8 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Final
 
+from aura_harness.backend import Backend, BackendError
 from aura_harness.critic.models import Critique
-from aura_harness.llm import OllamaClient, OllamaError
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ class CriticClient:
 
     def __init__(
         self,
-        client: OllamaClient,
+        backend: Backend,
         *,
         model: str = DEFAULT_CRITIC_MODEL,
         temperature: float = _DEFAULT_TEMPERATURE,
@@ -95,7 +95,7 @@ class CriticClient:
         """Construct a critic client.
 
         Args:
-            client: The :class:`OllamaClient` used for chat calls.
+            backend: The :class:`Backend` used for chat calls.
             model: Reasoning model name. Defaults to
                 :data:`DEFAULT_CRITIC_MODEL`.
             temperature: Sampling temperature for the reviewer.
@@ -103,7 +103,7 @@ class CriticClient:
                 to ``./.aura/critic.jsonl`` under the current working
                 directory.
         """
-        self._client = client
+        self._backend = backend
         self._model = model
         self._temperature = temperature
         self._log_path = (
@@ -165,12 +165,12 @@ class CriticClient:
         ]
 
         try:
-            result = self._client.chat(
+            result = self._backend.chat(
                 messages,
                 model=self._model,
                 temperature=self._temperature,
             )
-        except OllamaError as exc:
+        except BackendError as exc:
             critique = Critique(
                 passed=False,
                 violations=(f"critic transport error: {exc}",),
@@ -181,8 +181,8 @@ class CriticClient:
                 user_content=user_content,
                 response_text="",
                 critique=critique,
-                prompt_eval_count=0,
-                eval_count=0,
+                prompt_tokens=0,
+                completion_tokens=0,
                 total_duration_ms=0.0,
                 error=str(exc),
             )
@@ -193,8 +193,8 @@ class CriticClient:
             user_content=user_content,
             response_text=result.text,
             critique=critique,
-            prompt_eval_count=result.prompt_eval_count,
-            eval_count=result.eval_count,
+            prompt_tokens=result.prompt_tokens,
+            completion_tokens=result.completion_tokens,
             total_duration_ms=result.total_duration_ms,
             error=None,
         )
@@ -206,8 +206,8 @@ class CriticClient:
         user_content: str,
         response_text: str,
         critique: Critique,
-        prompt_eval_count: int,
-        eval_count: int,
+        prompt_tokens: int,
+        completion_tokens: int,
         total_duration_ms: float,
         error: str | None,
     ) -> None:
@@ -219,8 +219,8 @@ class CriticClient:
             "passed": critique.passed,
             "violation_count": len(critique.violations),
             "suggestion_count": len(critique.suggestions),
-            "prompt_eval_count": prompt_eval_count,
-            "eval_count": eval_count,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
             "total_duration_ms": total_duration_ms,
             "error": error,
         }

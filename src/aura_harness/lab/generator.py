@@ -1,16 +1,17 @@
-"""Parallel candidate generation against a local Ollama model.
+"""Parallel candidate generation against a chat-capable :class:`Backend`.
 
-The :class:`CandidateGenerator` fans out N independent ``generate`` calls
+The :class:`CandidateGenerator` fans out N independent chat completions
 through a thread pool, each with its own seed, and returns them as a
-:class:`CandidateBatch`. Failures on individual candidates are captured rather
-than raised so the rest of the batch can complete.
+:class:`CandidateBatch`. Failures on individual candidates are captured
+rather than raised so the rest of the batch can complete.
 
-Concurrency note: Ollama caps how many requests it processes concurrently
-per model via the ``OLLAMA_NUM_PARALLEL`` environment variable (default 1 on
-older builds, 4 on newer ones). When that cap is below ``max_workers`` the
-server queues the extras; results are still correct, but the speedup
-flattens. Bump ``OLLAMA_NUM_PARALLEL`` on the server side if you want full
-throughput.
+Concurrency note: when the backend is a local Ollama server, the server
+caps how many requests it processes concurrently per model via the
+``OLLAMA_NUM_PARALLEL`` environment variable (default 1 on older builds,
+4 on newer ones). When that cap is below ``max_workers`` the server
+queues the extras; results are still correct, but the speedup flattens.
+Bump ``OLLAMA_NUM_PARALLEL`` on the server side if you want full
+throughput. Cloud backends have their own concurrency limits.
 """
 from __future__ import annotations
 
@@ -24,8 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
 
+from aura_harness.backend import Backend, CompletionResult
 from aura_harness.lab.models import Candidate, CandidateBatch
-from aura_harness.llm import CompletionResult, OllamaClient
 
 logger = logging.getLogger(__name__)
 
@@ -40,21 +41,21 @@ class CandidateGenerator:
 
     def __init__(
         self,
-        client: OllamaClient,
+        backend: Backend,
         max_workers: int = _DEFAULT_MAX_WORKERS,
         log_path: Path | None = None,
     ) -> None:
         """Construct a generator.
 
         Args:
-            client: The :class:`OllamaClient` used to issue completion calls.
+            backend: The :class:`Backend` used to issue chat calls.
             max_workers: Upper bound on concurrent in-flight requests.
             log_path: JSONL file to append batch summaries to. Defaults to
                 ``./.aura/batches.jsonl`` under the current working directory.
         """
         if max_workers < 1:
             raise ValueError("max_workers must be >= 1")
-        self._client = client
+        self._backend = backend
         self._max_workers = max_workers
         self._log_path = (
             log_path if log_path is not None else Path.cwd() / ".aura" / "batches.jsonl"
@@ -73,16 +74,21 @@ class CandidateGenerator:
     ) -> CandidateBatch:
         """Generate ``n`` candidate completions in parallel.
 
+        ``prompt`` becomes the user message. When ``system`` is provided
+        it is prepended as a system message; otherwise the chat is
+        single-turn user-only.
+
         Args:
             prompt: User prompt; identical for every candidate.
             n: Number of candidates to generate. Must be ``>= 1``.
-            model: Override the client's default model.
+            model: Override the backend's default model.
             system: Optional system prompt; identical for every candidate.
             temperature: Sampling temperature. Defaults higher than the
-                client's own default (0.2) to encourage diverse candidates.
+                backend's chat default (0.2) to encourage diverse candidates.
             base_seed: Seed for candidate ``0``; candidate ``i`` uses
                 ``base_seed + i``. If ``None``, a random base is picked.
             num_predict: Optional cap on tokens generated per candidate.
+                Maps to the backend's ``max_tokens`` parameter.
 
         Returns:
             A :class:`CandidateBatch` with exactly ``n`` candidates ordered
@@ -94,7 +100,8 @@ class CandidateGenerator:
 
         chosen_seed_base = base_seed if base_seed is not None else random.randint(0, _SEED_MAX)
         seeds = [chosen_seed_base + i for i in range(n)]
-        chosen_model = model or self._client.default_model
+        chosen_model = model or self._backend.default_model
+        messages = _build_messages(prompt=prompt, system=system)
         batch_id = uuid.uuid4().hex
 
         logger.debug(
@@ -113,9 +120,8 @@ class CandidateGenerator:
                     self._run_one,
                     index=i,
                     seed=seeds[i],
-                    prompt=prompt,
+                    messages=messages,
                     model=chosen_model,
-                    system=system,
                     temperature=temperature,
                     num_predict=num_predict,
                 )
@@ -142,24 +148,22 @@ class CandidateGenerator:
         *,
         index: int,
         seed: int,
-        prompt: str,
+        messages: list[dict[str, str]],
         model: str,
-        system: str | None,
         temperature: float,
         num_predict: int | None,
     ) -> Candidate:
-        """Run a single ``client.generate`` call and wrap the outcome."""
+        """Run a single ``backend.chat`` call and wrap the outcome."""
         started = time.perf_counter()
         result: CompletionResult | None = None
         error: str | None = None
         try:
-            result = self._client.generate(
-                prompt,
+            result = self._backend.chat(
+                messages,
                 model=model,
-                system=system,
                 temperature=temperature,
                 seed=seed,
-                num_predict=num_predict,
+                max_tokens=num_predict,
             )
         except Exception as exc:  # noqa: BLE001 — capture all per-candidate failures
             error = str(exc)
@@ -198,3 +202,13 @@ class CandidateGenerator:
                 fh.write(json.dumps(record) + "\n")
         except OSError as exc:
             logger.warning("failed to write batch log to %s: %s", self._log_path, exc)
+
+
+def _build_messages(*, prompt: str, system: str | None) -> list[dict[str, str]]:
+    """Compose the chat messages list from a raw prompt and optional system."""
+    if system is not None:
+        return [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ]
+    return [{"role": "user", "content": prompt}]
