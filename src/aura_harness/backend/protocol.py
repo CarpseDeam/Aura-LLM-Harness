@@ -53,11 +53,16 @@ class CompletionResult:
 class Backend(Protocol):
     """Provider-agnostic chat backend.
 
-    Implementations must expose a ``default_model`` property and a
-    :meth:`chat` method. Errors must be raised as :class:`BackendError`
-    (or a subclass) so consumer code can catch one error type regardless
-    of provider.
+    Implementations must expose a ``name`` property, a ``default_model``
+    property, and a :meth:`chat` method. Errors must be raised as
+    :class:`BackendError` (or a subclass) so consumer code can catch one
+    error type regardless of provider.
     """
+
+    @property
+    def name(self) -> str:
+        """Stable backend identifier for genealogy stamping."""
+        ...
 
     @property
     def default_model(self) -> str:

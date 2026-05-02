@@ -37,6 +37,11 @@ class LocalOllamaBackend:
         self._client = client
 
     @property
+    def name(self) -> str:
+        """Stable backend identifier used for genealogy stamping."""
+        return "local_ollama"
+
+    @property
     def client(self) -> OllamaClient:
         """The wrapped :class:`OllamaClient`.
 
