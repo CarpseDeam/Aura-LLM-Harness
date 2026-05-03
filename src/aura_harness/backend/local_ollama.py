@@ -1,8 +1,20 @@
 """Local Ollama backend — wraps :class:`OllamaClient` as a :class:`Backend`."""
 from __future__ import annotations
 
-from aura_harness.backend.protocol import BackendError, CompletionResult
+import json
+from typing import Any, Iterator
+
+import httpx
+
+from aura_harness.backend.protocol import (
+    BackendError,
+    CompletionResult,
+    StreamChunk,
+)
 from aura_harness.llm import OllamaClient, OllamaError
+
+_NS_PER_MS: float = 1_000_000.0
+_BODY_TRUNCATE_CHARS: int = 500
 
 
 class LocalOllamaBackend:
@@ -96,3 +108,89 @@ class LocalOllamaBackend:
             total_duration_ms=raw.total_duration_ms,
             raw=raw.raw,
         )
+
+    def chat_stream(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        model: str,
+        temperature: float = 0.2,
+        seed: int | None = None,
+        max_tokens: int | None = None,
+        response_format: str | None = None,
+        reasoning: bool = False,
+    ) -> Iterator[StreamChunk]:
+        """Stream a chat completion from Ollama's ``/api/chat``.
+
+        Yields a :class:`StreamChunk` per server-emitted JSON line. The
+        terminal line (``done=true``) carries the accumulated
+        :class:`CompletionResult` in ``StreamChunk.final``.
+
+        ``response_format`` and ``reasoning`` are accepted for protocol
+        compatibility but have no effect for Ollama; see the class
+        docstring.
+
+        Raises:
+            BackendError: On transport failure, non-2xx response, or
+                JSON decoding errors.
+        """
+        del response_format, reasoning
+        options: dict[str, Any] = {"temperature": temperature}
+        if seed is not None:
+            options["seed"] = seed
+        if max_tokens is not None:
+            options["num_predict"] = max_tokens
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+            "options": options,
+        }
+
+        accumulated: list[str] = []
+        try:
+            with httpx.Client(
+                base_url=self._client.base_url,
+                timeout=self._client.timeout_seconds,
+            ) as http_client:
+                with http_client.stream("POST", "/api/chat", json=payload) as response:
+                    if not (200 <= response.status_code < 300):
+                        body = response.read().decode("utf-8", errors="replace")
+                        raise BackendError(
+                            f"Ollama returned HTTP {response.status_code}: "
+                            f"{body[:_BODY_TRUNCATE_CHARS]}"
+                        )
+                    for line in response.iter_lines():
+                        if not line:
+                            continue
+                        try:
+                            data = json.loads(line)
+                        except ValueError as exc:
+                            raise BackendError(
+                                f"invalid JSON from Ollama stream: {line[:_BODY_TRUNCATE_CHARS]}"
+                            ) from exc
+
+                        message = data.get("message") or {}
+                        delta = str(message.get("content", ""))
+                        if data.get("done"):
+                            text = "".join(accumulated)
+                            result = CompletionResult(
+                                text=text,
+                                model=str(data.get("model", model)),
+                                prompt_tokens=int(data.get("prompt_eval_count", 0)),
+                                completion_tokens=int(data.get("eval_count", 0)),
+                                total_duration_ms=float(data.get("total_duration", 0))
+                                / _NS_PER_MS,
+                                raw=data,
+                            )
+                            yield StreamChunk(delta="", final=result)
+                            return
+                        accumulated.append(delta)
+                        yield StreamChunk(delta=delta, final=None)
+        except httpx.HTTPError as exc:
+            raise BackendError(
+                f"could not reach Ollama at {self._client.base_url}: {exc}"
+            ) from exc
+        except OllamaError as exc:
+            raise BackendError(str(exc)) from exc

@@ -14,7 +14,7 @@ type every backend raises so consumers can write provider-agnostic
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Iterator, Protocol
 
 
 class BackendError(Exception):
@@ -48,6 +48,28 @@ class CompletionResult:
     completion_tokens: int
     total_duration_ms: float
     raw: dict[str, Any] = field(repr=False)
+
+
+@dataclass(frozen=True)
+class StreamChunk:
+    """One chunk produced by :meth:`Backend.chat_stream`.
+
+    Attributes:
+        delta: Incremental text for this chunk. May be empty (e.g. on a
+            terminal chunk that only carries ``final``, or on keep-alive
+            chunks that the backend has not filtered out).
+        final: ``None`` while streaming. On the terminal chunk, the full
+            accumulated :class:`CompletionResult` — equivalent to what
+            :meth:`Backend.chat` would have returned for the same args.
+
+    A terminal chunk may carry both a non-empty ``delta`` and a populated
+    ``final``, or it may carry ``final`` with ``delta=""``. The caller
+    pattern is: iterate chunks, accumulate or display ``delta``, capture
+    ``final`` when ``chunk.final is not None``.
+    """
+
+    delta: str
+    final: CompletionResult | None
 
 
 class Backend(Protocol):
@@ -101,6 +123,50 @@ class Backend(Protocol):
 
         Returns:
             A :class:`CompletionResult`.
+
+        Raises:
+            BackendError: On any provider failure (transport, HTTP,
+                decoding). Concrete backends translate their internal
+                errors into ``BackendError``.
+        """
+        ...
+
+    def chat_stream(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        model: str,
+        temperature: float = 0.2,
+        seed: int | None = None,
+        max_tokens: int | None = None,
+        response_format: str | None = None,
+        reasoning: bool = False,
+    ) -> Iterator[StreamChunk]:
+        """Run a streaming chat completion.
+
+        Yields :class:`StreamChunk` instances as the provider produces
+        text. The terminal chunk carries a populated ``final`` field
+        with the full accumulated :class:`CompletionResult`.
+
+        Semantic contract: consuming ``chat_stream`` to completion and
+        taking the terminal chunk's ``final`` must produce a
+        :class:`CompletionResult` equivalent to what :meth:`chat` would
+        return for the same args. Implementations are free to share
+        code between the two methods or not — the contract is what
+        matters.
+
+        Args:
+            messages: List of ``{"role", "content"}`` dicts.
+            model: Model name to dispatch against.
+            temperature: Sampling temperature.
+            seed: Optional deterministic sampling seed.
+            max_tokens: Optional cap on tokens generated.
+            response_format: Optional structured-output toggle.
+            reasoning: When ``True``, request the provider's thinking
+                / extended-reasoning mode where supported.
+
+        Yields:
+            :class:`StreamChunk` per provider-emitted chunk.
 
         Raises:
             BackendError: On any provider failure (transport, HTTP,

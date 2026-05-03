@@ -1,68 +1,92 @@
-Dispatch 3: Station base + Worker station + Critic station + linear executor.
+Dispatch 4: streaming on the Backend protocol + CloudHTTPBackend (DeepSeek as first concrete cloud impl).
 
-Goal: stand up the Station abstraction over existing CandidateGenerator and CriticClient so the harness can run a Slice through Worker (which loops a single-pass Critic internally) and produce a CodeArtifact in the new state schema. End state is a runnable pipeline that takes a Plan with one or more Slices and produces CodeArtifacts, reproducing duplicate_finder's existing bench behavior end-to-end.
+Goal: extend the Backend contract with chat_stream(), implement it on LocalOllamaBackend additively, add CloudHTTPBackend using the openai SDK pointed at DeepSeek's OpenAI-compatible endpoint. End state: both backends satisfy the extended Protocol; the cloud backend is independently runnable via a smoke CLI before any station wiring.
 
-Read first, before writing anything:
-- aura_harness/state/types.py — for exact field shapes of Slice, SliceContract, CodeArtifact, CritiqueReport, Plan, RunState. Use the actual fields, not what this dispatch guesses at.
-- aura_harness/backend/protocol.py and local_ollama.py.
-- The existing CandidateGenerator and CriticClient (post-dispatch-1 refactor — they take a Backend now).
-- The existing bench runner / duplicate_finder task definition, to understand how scoring and task loading currently work.
+Read first:
+- aura_harness/backend/protocol.py and local_ollama.py for the current Backend shape, CompletionResult fields, and BackendError.
+- pyproject.toml (or requirements.txt — wherever deps actually live) to add the openai SDK.
+- DeepSeek's current API docs for two specific things: the exact parameter name for thinking mode (verify, don't guess — the OpenAI SDK passes it via extra_body or as a top-level kwarg depending on what DeepSeek expects), and the current stable model strings (deepseek-v4-flash and deepseek-v4-pro per the handoff, but confirm).
 
-Backend.name property
+StreamChunk
 
-Add a read-only `name: str` property to the Backend Protocol in backend/protocol.py. Implement on LocalOllamaBackend returning "local_ollama". This is for genealogy stamping; cloud backend in dispatch 4 will return its own identifier. One-line change to the Protocol, one-line addition to the implementation.
+Add a frozen dataclass StreamChunk in backend/protocol.py alongside CompletionResult:
+- delta: str — incremental text for this chunk; "" allowed
+- final: CompletionResult | None — None during streaming, populated on the terminal chunk with the full accumulated CompletionResult
 
-aura_harness/stations/
+The terminal chunk may carry both delta and final, or final with delta="" — either shape is fine. Caller pattern is "iterate chunks, accumulate or display deltas, capture final when chunk.final is not None."
 
-New module. Files:
+Backend Protocol: add chat_stream
 
-base.py — Station abstract base class. Required attributes: `name: str`, `backend: Backend`. Provides one helper, `_genealogy(seed=None, input_ref=None) -> dict` that returns the five genealogy fields (produced_by_station=self.name, produced_by_backend=self.backend.name, produced_at=<timestamp in whatever format types.py uses — match the existing convention, str-ISO or datetime — don't introduce a new one>, seed=seed, input_ref=input_ref) ready to spread into a frozen dataclass constructor. No `run` method on the base — signatures vary per station, so subclasses define their own. Keep base.py minimal; it's not trying to enforce a uniform contract, it's sharing genealogy plumbing.
+Same kwargs as chat(), returns Iterator[StreamChunk]:
 
-critic.py — CriticStation. Constructor takes name (default "critic"), backend, and a CriticClient instance (caller constructs and passes in, so model selection stays at the call site). Signature: `run(artifact: CodeArtifact, slice: Slice) -> CritiqueReport`. Calls CriticClient's single-pass critique method (the one that does one critique without looping — if CriticClient currently only exposes `run_with_critic_loop`, factor out the single-pass path as a public method on CriticClient and have run_with_critic_loop call it. Don't change run_with_critic_loop's behavior — the existing bench still uses it). Take the parsed critic output and shape it into a CritiqueReport with genealogy stamped, input_ref=artifact.id. Whatever fields CritiqueReport has in types.py, populate from the critic output.
+chat_stream(messages, *, model, temperature=0.2, seed=None, max_tokens=None, response_format=None, reasoning=False) -> Iterator[StreamChunk]
 
-worker.py — WorkerStation. Constructor takes name (default "worker"), backend, candidate_generator, critic_station, max_critic_rounds (int). Signature: `run(slice: Slice, state: RunState) -> CodeArtifact`. Returns the final CodeArtifact only — intermediate retry artifacts are constructed during the loop (so parent_artifact_ids on later rounds can reference the prior id) but not returned or stored in state. This matches existing CriticClient.run_with_critic_loop semantics; if a future dispatch needs the full chain accessible (plan-level critic reconstructing genealogy), we'll change the return shape then. Don't paint into a corner that prevents that — the intermediate artifacts should be real CodeArtifact instances with real ids, just discarded after the loop.
+Semantic contract between the two methods: consuming chat_stream() to completion and taking chunk.final must produce a CompletionResult equivalent to calling chat() with the same args. Implementations are free to share code or not; the contract is what matters.
 
-Internal flow inside run():
-1. Generate k candidates via candidate_generator. k comes from the generator's existing config or a constructor param — match existing behavior.
-2. Validate candidates (AST parse, expected_symbols presence per slice.contract.expected_symbols, forbidden_imports check per slice.contract.forbidden_imports). If validation logic currently lives inside CandidateGenerator, reuse it; if it lives elsewhere, call it from there. Don't reimplement.
-3. Pick the best valid candidate using existing selection logic.
-4. Build CodeArtifact (round 0): parent_artifact_ids=(), genealogy stamped with input_ref=slice.id and seed=<whatever seed was used, None if unseeded>.
-5. Loop up to max_critic_rounds:
-   - critic_station.run(current_artifact, slice) → CritiqueReport.
-   - If report indicates pass (whatever the schema's pass-flag is — match types.py), return current_artifact.
-   - Else, regenerate candidates with reflexion feedback (the existing CandidateGenerator code path that takes critique feedback as additional context — find it, reuse it).
-   - Validate, pick best.
-   - Build new CodeArtifact: parent_artifact_ids=(prior.id,), genealogy stamped.
-6. After loop exhaustion, return the last artifact built (even if its critique didn't pass).
+LocalOllamaBackend.chat_stream
 
-The validation step and the candidate-picking step exist in CandidateGenerator already. Don't duplicate the logic in WorkerStation — call the existing methods. WorkerStation is a thin orchestrator over CandidateGenerator and CriticStation, not a reimplementation.
+Hits Ollama's /api/chat with stream=true. Each JSON line in the response becomes StreamChunk(delta=msg.content, final=None). The line with done=true builds CompletionResult from total_duration, prompt_eval_count, eval_count, raw, and yields StreamChunk(delta="", final=result).
 
-__init__.py — exports Station, WorkerStation, CriticStation.
+Leave LocalOllamaBackend.chat() alone. Its current non-streaming /api/chat path is what dispatch 3's regression check ran against; don't reroute it through chat_stream(). chat_stream is purely additive.
 
-aura_harness/pipeline/
+backend/cloud_http.py — new file
 
-New module. Files:
+CloudHTTPBackend class. Constructor:
+- base_url: str
+- api_key: str
+- name: str = "cloud"
+- timeout: float = 900.0 (DeepSeek can hold connections open during queueing; default openai timeout of 600s is borderline)
 
-linear.py — LinearExecutor. Constructor takes worker_station and optionally an integrator_station (None for now; if non-None, called after the slice loop completes — leave the wiring as a single-line call site with a TODO, don't implement IntegratorStation in this dispatch). Signature: `run(state: RunState, plan: Plan) -> RunState`. Iterates plan.slices in input order (no topo-sort yet — duplicate_finder is single-slice, and Slice may not even have a depends_on field; if it does, leave the topo-sort as TODO). For each slice, calls worker_station.run(slice, state), and returns a new RunState with the resulting CodeArtifact appended to state.code_artifacts (or whatever the schema field is called for the artifact tuple). Immutable: `RunState(..., code_artifacts=state.code_artifacts + (artifact,))`.
+Stores an openai.OpenAI client built from base_url, api_key, timeout. Exposes self.name for genealogy.
 
-__init__.py — exports LinearExecutor.
+Implements both:
+- chat(messages, *, model, ...) -> CompletionResult: client.chat.completions.create(stream=False, ...), shape the response into CompletionResult. response_format passes through to the SDK (DeepSeek supports {"type": "json_object"}). reasoning=True maps to DeepSeek's thinking mode parameter — verify the exact name from current docs. temperature, seed, max_tokens are standard OpenAI params.
+- chat_stream(messages, *, model, ...) -> Iterator[StreamChunk]: client.chat.completions.create(stream=True, stream_options={"include_usage": True}, ...). Iterate chunks, yield StreamChunk(delta=chunk.choices[0].delta.content or "", final=None). On the final chunk (finish_reason set, usage block populated), accumulate the full text from prior deltas and yield StreamChunk(delta="", final=CompletionResult(...)) using the usage block for token counts.
 
-__main__.py — CLI entrypoint. Mirrors the existing bench CLI: `python -m aura_harness.pipeline --task duplicate_finder --runs 3 --n 3 --model qwen2.5-coder:7b --critic-rounds 2`. Loads the same task definition the bench loads (same task registry / loader). For each run: builds a TaskSpec, builds a Plan with the task's single Slice, constructs LocalOllamaBackend, CandidateGenerator, CriticClient, CriticStation, WorkerStation (with max_critic_rounds from the CLI), LinearExecutor. Runs the executor, extracts the resulting CodeArtifact, scores it using the existing bench scoring function (find it, import it, reuse it). Prints per-run scores and aggregate. Output format should be close enough to the bench's that user can eyeball-compare. This entrypoint is the regression check: same task, same model, same k, same critic-rounds → score within noise of the existing bench's historical 70-80% range for qwen2.5-coder:7b on duplicate_finder.
+DeepSeek's keep-alive/empty SSE events are handled transparently by the openai SDK iterator — no special filtering needed.
 
-Behavior details:
-- Genealogy on CodeArtifact: produced_by_station = "worker", produced_by_backend = "local_ollama", produced_at populated, seed = whatever the candidate generator used (None if unseeded), input_ref = slice.id.
-- Genealogy on CritiqueReport: produced_by_station = "critic", produced_by_backend = "local_ollama", produced_at populated, seed = None, input_ref = artifact.id.
-- parent_artifact_ids: () on round 0, (prior.id,) on retries. This is a tuple even with one element.
-- All schema dataclasses are frozen — construct them at the end, don't try to mutate. RunState updates are "build new RunState with extended tuples."
+Errors: catch openai.APIError and its subclasses, re-raise as BackendError (the existing unified type from dispatch 1) preserving the original message and status.
+
+backend/cloud_constants.py — DeepSeek defaults
+
+A small module exposing:
+- DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+- Optionally model name constants (DEEPSEEK_FLASH, DEEPSEEK_PRO) — nice but not required; strings are fine.
+
+Future cloud providers (Anthropic, Together, OpenRouter, etc.) will get their own constants files using the same CloudHTTPBackend class.
+
+Dependency
+
+Add openai to pyproject.toml (or requirements.txt). Pin to a recent stable version. Run install if needed.
+
+Smoke CLI
+
+backend/smoke.py with a __main__ block. Args:
+- --backend {local,cloud}
+- --model <model_name>
+- --prompt <text>
+- --stream / no flag for non-streaming
+- --reasoning / no flag
+
+For --backend cloud: read DEEPSEEK_API_KEY from env, construct CloudHTTPBackend with DEEPSEEK_BASE_URL.
+For --backend local: construct LocalOllamaBackend with default URL.
+
+With --stream: iterate chat_stream(), print deltas as they arrive (no buffering — flush on each delta), print the final CompletionResult's token counts and duration at the end.
+Without --stream: call chat(), print result text, then token counts and duration.
+
+This is the verification path. User will run it against both backends to confirm cloud auth, streaming, keep-alive tolerance, and thinking mode all work before any station wiring touches CloudHTTPBackend.
 
 Definition of done:
-- Existing 69 tests still pass. No behavior change in backend, CandidateGenerator, or CriticClient (CriticClient may gain a public single-pass method, but run_with_critic_loop's external behavior is unchanged).
-- aura_harness/stations/{__init__.py, base.py, worker.py, critic.py} exist with the structure above.
-- aura_harness/pipeline/{__init__.py, linear.py, __main__.py} exist.
-- Backend.name property added on Protocol and LocalOllamaBackend.
-- CodeArtifact and CritiqueReport produced by the new pipeline have all genealogy fields populated and parent_artifact_ids correct.
-- `python -m aura_harness.pipeline --task duplicate_finder --runs 1 --n 3 --model qwen2.5-coder:7b --critic-rounds 2` runs end-to-end with Ollama up and produces a CodeArtifact with non-empty code. Full 3-run regression compare is the user's call to make after dispatch lands.
+- StreamChunk dataclass in backend/protocol.py.
+- Backend Protocol declares chat_stream().
+- LocalOllamaBackend.chat_stream() implemented; chat() unchanged.
+- backend/cloud_http.py with CloudHTTPBackend implementing both methods via openai SDK.
+- backend/cloud_constants.py with DEEPSEEK_BASE_URL.
+- openai added as a dependency, installable.
+- backend/smoke.py runs end-to-end against both backends with and without --stream.
+- All existing 69 tests still pass.
+- No behavior change in the chat() path for either backend — duplicate_finder regression remains valid.
 
-Don't add tests for the new code unless something specific can only be verified that way. The pipeline CLI run against the real model is the meaningful check. Existing tests passing covers regressions in the unchanged code paths.
+No new tests required for the cloud backend; the smoke CLI hitting the real API is the meaningful verification, and the user will run it.
 
 Make the change described. The dispatch names the files that matter — work those, then stop. Match existing style; type hints everywhere.
