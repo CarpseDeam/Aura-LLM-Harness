@@ -254,7 +254,12 @@ class RunState:
     plan: Plan | None = None
     artifacts: tuple[CodeArtifact, ...] = ()
     critiques: tuple[CritiqueReport, ...] = ()
+    integration: IntegrationResult | None = None
 ```
+
+`integration` is set once the integrator station has materialized the plan into
+a workspace; it carries the per-file write log and any compile errors so the
+full record of one run lives on a single value.
 
 ## 3. Genealogy
 

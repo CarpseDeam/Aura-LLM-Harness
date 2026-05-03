@@ -311,8 +311,9 @@ class RunState:
     """The full state threaded through a single harness run.
 
     A run begins with only ``task`` populated; later stations append to
-    ``plan``, ``artifacts``, and ``critiques`` by constructing a new
-    :class:`RunState` (the type is frozen — every update is a copy).
+    ``plan``, ``artifacts``, ``critiques``, and ``integration`` by
+    constructing a new :class:`RunState` (the type is frozen — every
+    update is a copy).
 
     Attributes:
         run_id: Stable identifier for the run.
@@ -322,6 +323,8 @@ class RunState:
             production order. Includes round-0, retry, and integration
             artifacts.
         critiques: Every :class:`CritiqueReport` produced so far.
+        integration: Set once the integrator has emitted an
+            :class:`IntegrationResult` for this run's plan.
     """
 
     run_id: str
@@ -329,3 +332,4 @@ class RunState:
     plan: Plan | None = None
     artifacts: tuple[CodeArtifact, ...] = ()
     critiques: tuple[CritiqueReport, ...] = ()
+    integration: IntegrationResult | None = None

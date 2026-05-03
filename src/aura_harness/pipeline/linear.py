@@ -24,6 +24,11 @@ class LinearExecutor:
         self._worker_station = worker_station
         self._integrator_station = integrator_station
 
+    @property
+    def worker_station(self) -> WorkerStation:
+        """The wrapped worker station."""
+        return self._worker_station
+
     def run(self, state: RunState, plan: Plan) -> RunState:
         """Process every slice in ``plan`` and return the extended :class:`RunState`."""
         # TODO: topo-sort by Slice.depends_on once a multi-slice plan needs it.

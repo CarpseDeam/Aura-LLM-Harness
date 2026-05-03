@@ -1,88 +1,87 @@
-Dispatch 5: PlannerStation. Takes a TaskSpec, calls a Backend, returns a structured Plan with Slices. DeepSeek is the primary target via CloudHTTPBackend; gpt-oss:20b through LocalOllamaBackend is the secondary target. Backend selection happens at the call site, not inside PlannerStation.
+Dispatch 7: end-to-end pipeline orchestrator. Wires PlannerStation → LinearExecutor (workers + critic loop already in place from dispatch 3) → IntegratorStation. Configurable backends per stage. Reads a TaskSpec from a file, writes integrated code to a workspace, saves a structured run record alongside it.
 
 Read first:
-- aura_harness/state/types.py — exact fields on TaskSpec, Plan, Slice, SliceContract. Don't assume; verify. In particular, check whether Slice has a target_path field, whether it has a depends_on field, and what the id types/conventions are across these dataclasses.
-- aura_harness/stations/base.py and the existing CriticStation/WorkerStation from dispatch 3 — for the Station metadata pattern and the _genealogy() helper.
-- aura_harness/backend/protocol.py and cloud_http.py — confirm response_format is plumbed through to the openai SDK on the cloud path. It is, per dispatch 4, but verify.
+- aura_harness/pipeline/linear.py — confirm LinearExecutor's current signature and what it expects in RunState. The dispatch-3 executor takes (state, plan) and returns RunState with artifacts appended; verify.
+- aura_harness/pipeline/__main__.py — the duplicate_finder bench entrypoint from dispatch 3. Don't break it; it's the regression check. Keep it as-is. The new full-pipeline entrypoint is separate.
+- aura_harness/state/types.py — confirm RunState's fields. In particular, check whether RunState already has a place for the Plan and the IntegrationResult, or whether those need to be added.
+- aura_harness/stations/{planner,worker,critic,integrator}.py — confirm constructor signatures so the orchestrator wires them correctly.
+- aura_harness/backend/{cloud_http,local_ollama}.py — for backend construction patterns and default model strings.
 
-Slice target_path field
+RunState extension if needed
 
-If Slice does not currently have a target_path field, add one as part of this dispatch. It's optional (str | None) for backward compatibility with whatever dispatch 3's executor produced, but the planner always populates it. Update aura_harness/state/types.py and aura_harness/state/__init__.py exports if needed. Update docs/STATE_SCHEMA.md to describe target_path in one sentence.
+If RunState doesn't currently carry plan: Plan | None and integration: IntegrationResult | None, add them. Frozen dataclass, so build new RunState with extended state at each stage. Update state/__init__.py exports if needed and add a sentence to docs/STATE_SCHEMA.md.
 
-aura_harness/stations/planner.py
+aura_harness/pipeline/orchestrator.py
 
-PlannerStation class. Constructor:
-- name: str = "planner"
-- backend: Backend
-- model: str — caller passes the model string (e.g. "deepseek-v4-flash" for cloud, "gpt-oss:20b" for local)
-- temperature: float = 0.2
-- max_parse_retries: int = 1
+Pipeline class. Constructor:
+- planner: PlannerStation
+- executor: LinearExecutor
+- integrator: IntegratorStation
 
 Signature:
-- run(task_spec: TaskSpec) -> Plan
+- run(task_spec: TaskSpec, workspace_path: str) -> RunState
 
 Internal flow:
-1. Render the planner prompt from task_spec.description (and any other relevant TaskSpec fields). Use the prompt template file (see below).
-2. Call backend.chat() with messages=[{"role": "system", "content": <planner system prompt>}, {"role": "user", "content": <rendered task>}], response_format={"type": "json_object"}, temperature, model. response_format is a no-op on LocalOllamaBackend (per dispatch 1) and the prompt itself has to coerce JSON output for the local path; that's expected and the prompt should be written to work either way.
-3. Parse the response text as JSON. On parse failure: retry up to max_parse_retries times by appending a follow-up user message {"role": "user", "content": <parse error feedback, asking for valid JSON only>}. After retries exhausted, raise BackendError with the last parse error.
-4. Validate the parsed JSON against the Plan/Slice schema:
-   - Top-level object has a "slices" array with at least one entry.
-   - Each slice has the fields the dataclass requires (id, description, target_path, contract.expected_symbols, contract.forbidden_imports).
-   - Slice ids are unique.
-   - Validation failures get one retry the same way parse failures do (feedback message → re-call). After exhaustion, raise.
-5. Construct frozen Plan / Slice / SliceContract dataclasses from the validated JSON.
-6. Stamp genealogy on the Plan: produced_by_station="planner", produced_by_backend=self.backend.name, produced_at=<datetime, matching the convention used elsewhere>, seed=None, input_ref=task_spec.id (or whatever the TaskSpec identifier field is — use the actual field name from types.py).
-7. Return the Plan.
+1. Build initial RunState from task_spec.
+2. Call planner.run(task_spec) → Plan. Append plan to state.
+3. Call executor.run(state_with_plan, plan) → RunState with artifacts. The executor runs each slice's worker (with internal critic loop). If a worker exhausts critic rounds without passing, it still returns the last CodeArtifact — that's existing behavior from dispatch 3, don't change it. The pipeline does NOT bail early on worker failures; we want maximum information per run, so all slices get attempted regardless of individual outcomes.
+4. Call integrator.run(plan, state.artifacts, workspace_path) → IntegrationResult. Append to state.
+5. Return final state.
 
-Plan-level critic is explicitly out of scope. Don't add hooks for it. Keep the return type `Plan`, not `Plan | CritiqueReport`. When plan-level critic lands later, we'll change the signature then.
+If planner.run raises BackendError, let it propagate — there's no recovery and the user needs to see it. Don't wrap in try/except. Same for executor.run if it raises (shouldn't, but if it does, propagate). Integrator.run never raises by design; it returns IntegrationResult with success=False on any failure.
 
-aura_harness/stations/prompts/planner.md (or .txt — match whatever convention exists; if no prompts directory exists yet, create it)
+aura_harness/__main__.py — top-level CLI entrypoint
 
-The system + user prompt template the station renders. Two sections in the file separated by a clear marker the loader can split on (e.g. `---SYSTEM---` and `---USER---`, or just two files `planner_system.md` and `planner_user.md` — your call, pick the one that fits the existing repo patterns better).
+`python -m aura_harness --task-file <path> --workspace <path> [options]` runs the full pipeline.
 
-The system prompt establishes:
-- The role: "You are a software planner. You decompose a task into a small number of slices (typically 2-5 for small projects). Each slice produces one source file."
-- The output contract: must return a single JSON object matching the Plan schema. Include a literal example of the expected JSON structure with all fields populated for a trivial sample task. The example is the schema specification — make it accurate to the dataclasses.
-- Slice quality bar: each slice has a clear single responsibility, expected_symbols lists the public functions/classes the file must expose, forbidden_imports lists modules the file must not import (use this to enforce module boundaries — e.g. a "render" slice forbids importing from a "physics" slice's file, etc.), target_path is a relative path from the workspace root.
-- Compositional constraint: the slices, when implemented and combined, must produce a runnable program. Order of slices is execution order. Later slices may import from earlier slices' target_paths but not vice versa.
-- Style direction: prefer small files, one class or one logical unit per slice, no slice should be more than a few hundred lines of code.
+Required args:
+- --task-file: path to a TaskSpec spec file (matches the planner_smoke.py format from dispatch 5 — same pygame_smallgame/spec.md should work as input)
+- --workspace: directory to write integrated code and the run record. Created if missing.
 
-The user prompt template renders task_spec.description and any other relevant TaskSpec fields. Keep the user prompt minimal — the system prompt does the heavy lifting on schema and quality.
+Optional args (with defaults):
+- --planner-backend {cloud,local}: default cloud
+- --planner-model: default deepseek-v4-flash
+- --worker-backend {local,cloud}: default local. (Cloud workers are possible but expensive; default local is the thesis.)
+- --worker-model: default whatever dispatch 3's pipeline/__main__.py defaults to for qwen2.5-coder — match it. If no default is set there, use qwen2.5-coder:14b (strongest local fast worker per the project notes).
+- --critic-model: default whatever dispatch 3 used for the critic. Match it; don't introduce a new default.
+- --critic-rounds: default 2
+- -n / --candidates: default 3
 
-Smoke CLI: aura_harness/stations/planner_smoke.py with __main__
+For cloud backends, read DEEPSEEK_API_KEY from env. If a cloud backend is selected and the key is missing, exit with a clear error message before any work starts.
 
-Args:
-- --backend {local,cloud}
-- --model <model_name>
-- --task <task_description_string> OR --task-file <path>
+Construction order in main():
+1. Parse args.
+2. Build planner_backend (CloudHTTPBackend with DEEPSEEK_BASE_URL, or LocalOllamaBackend).
+3. Build worker_backend similarly.
+4. Build CriticClient with critic-model and worker_backend (the critic runs on the same backend as the worker — single-process resource considerations).
+5. Build CriticStation, CandidateGenerator, WorkerStation, IntegratorStation, PlannerStation. Wire them.
+6. Build LinearExecutor with the worker station.
+7. Build Pipeline. Run it.
+8. Write the run record (see below). Print summary.
 
-For cloud: read DEEPSEEK_API_KEY from env, build CloudHTTPBackend with DEEPSEEK_BASE_URL.
-For local: build LocalOllamaBackend with default URL.
+Run record
 
-Builds a TaskSpec from the --task or --task-file content (use sensible defaults for any other required TaskSpec fields). Constructs PlannerStation. Calls run(). Pretty-prints the resulting Plan: task description, slice count, then per-slice id / target_path / description / expected_symbols / forbidden_imports.
+After pipeline completion, write a `run_record.json` file at the workspace root containing a JSON serialization of the final RunState. Use a small helper to serialize: dataclasses.asdict for the state, datetime → ISO string, tuples → lists, omit any fields that aren't JSON-serializable (e.g. CompletionResult.raw might contain provider-specific objects — drop the raw field during serialization). The goal is enough information to reconstruct what happened: task, plan, slice contracts, per-artifact code, critique reports, integration result, all genealogy. Pretty-print with indent=2.
 
-If parsing fails, prints the raw model response and the parse error so the user can iterate on the prompt.
+Console output during the run
 
-Pygame TaskSpec for verification
+Print as the pipeline progresses, not just at the end. Suggested shape (don't over-engineer the formatting; plain text lines with clear section markers are fine):
+- "[planner] running on <backend>/<model>..." then on success "[planner] plan with N slices: <slice_id>, <slice_id>, ..."
+- "[worker N/M] slice=<slice_id> target=<target_path>" before each slice, then "[worker N/M] done critic_rounds_used=K passed=<bool>" after.
+- "[integrator] writing <count> files to <workspace>..." then "[integrator] success=<bool> compile_errors=<count>"
+- "[done] run_record at <path>"
 
-Save this as a file the user can point --task-file at. Suggested location: bench/tasks/pygame_smallgame/spec.md or similar — match the existing bench task file convention from duplicate_finder.
-
-Content (one paragraph, deliberately under-specified on genre):
-
-"Build a small pygame game runnable with `python main.py`. Single window, keyboard input, some kind of win/lose state. Pick the genre yourself — anything that fits in a few hundred lines. The code should be clean enough to commit: clear module boundaries, no dead code, a brief README in the same directory explaining how to run it. Constraints: pygame and python-stdlib only, no other dependencies."
-
-This is the dispatch-7 task as well. The planner picking the genre is part of the test.
+If the integration has compile_errors, print each one (file, line, type, message) at the end. The user is going to look at the workspace to evaluate quality, but compile errors should be visible without opening files.
 
 Definition of done:
-- aura_harness/stations/planner.py with PlannerStation.
-- Prompt template file(s) under stations/prompts/ or wherever fits the repo convention.
-- Slice.target_path field exists (added if it didn't already), schema doc updated.
-- aura_harness/stations/__init__.py exports PlannerStation.
-- aura_harness/stations/planner_smoke.py CLI runs end-to-end.
-- bench/tasks/pygame_smallgame/spec.md (or matching path) exists with the pygame task description.
-- All 69 existing tests still pass. No new tests required.
-- Running `python -m aura_harness.stations.planner_smoke --backend cloud --model deepseek-v4-flash --task-file bench/tasks/pygame_smallgame/spec.md` against the live API produces a parseable Plan with 2-5 slices, each with target_path, expected_symbols, and forbidden_imports populated. (User runs this — your verification is that the code path works structurally.)
+- aura_harness/pipeline/orchestrator.py with Pipeline class.
+- aura_harness/__main__.py with the top-level CLI.
+- RunState extended with plan and integration fields if they weren't already there.
+- run_record.json serialization helper (probably a small module, e.g. aura_harness/state/serialize.py).
+- All existing 69 tests still pass.
+- aura_harness/pipeline/__main__.py (the dispatch-3 duplicate_finder bench) still runs unchanged.
+- `python -m aura_harness --task-file bench/tasks/pygame_smallgame/spec.md --workspace ./tmp_pygame_run` executes end-to-end against live DeepSeek (planner) and live Ollama (workers), produces a populated workspace with a run_record.json. (User runs this; your job is to verify the code path is structurally correct.)
 
-Don't add plan-level critique. Don't add retries beyond parse/validation feedback. Don't add streaming. Don't add RepoMap input. Keep PlannerStation a thin, focused stage.
+Don't add: pipeline-level critic, plan-revision loop, retry of failed slices, branching, GUI integration, runtime execution of the integrated code (no `python main.py` invocation from inside the harness — that's the user's call after they look at what came out). Streaming is also out of scope here; the orchestrator uses chat() not chat_stream() for now.
 
 Make the change described. The dispatch names the files that matter — work those, then stop. Match existing style; type hints everywhere.
