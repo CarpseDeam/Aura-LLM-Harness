@@ -105,7 +105,13 @@ class Slice:
     target_files: tuple[Path, ...]
     depends_on: tuple[str, ...] = ()
     contract: SliceContract = SliceContract()
+    target_path: str | None = None
 ```
+
+`target_path` is the slice's single primary destination as a workspace-relative
+string — populated by the planner so a one-file-per-slice executor can write
+the artifact without parsing `target_files`; optional so older `Slice` values
+that only set `target_files` keep working.
 
 ### `Plan`
 

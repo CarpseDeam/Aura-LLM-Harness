@@ -101,6 +101,11 @@ class Slice:
         depends_on: ``slice_id`` values that must be completed first.
         contract: Mechanical acceptance criteria; defaults to an empty
             contract.
+        target_path: Single primary destination file as a workspace-
+            relative string. Optional for backward compatibility with
+            :class:`WorkerStation`'s ``target_files``-driven path; the
+            planner always populates it so executors can write a
+            single-file slice without inspecting ``target_files``.
     """
 
     slice_id: str
@@ -108,6 +113,7 @@ class Slice:
     target_files: tuple[Path, ...]
     depends_on: tuple[str, ...] = ()
     contract: SliceContract = SliceContract()
+    target_path: str | None = None
 
 
 @dataclass(frozen=True)

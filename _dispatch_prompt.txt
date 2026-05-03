@@ -1,49 +1,88 @@
-GUI cleanup pass on the Aura main window. Functional behavior stays intact — this is visual and layout only, no semantic changes to what the controls do.
+Dispatch 5: PlannerStation. Takes a TaskSpec, calls a Backend, returns a structured Plan with Slices. DeepSeek is the primary target via CloudHTTPBackend; gpt-oss:20b through LocalOllamaBackend is the secondary target. Backend selection happens at the call site, not inside PlannerStation.
 
 Read first:
-- The PySide6 GUI module (probably aura_harness/gui/ or aura_harness/ui/ — find it). Read every file that composes the main window.
-- Understand the semantics of each control before changing it: what the Planner text area does, what the second text area at the bottom does (currently "Describe what you want built..."), what the two Send buttons each trigger, what "Commit Generate" does, what the Validation checkbox toggles, what the two model dropdowns each control, what the N: spinner is for, what the file-list checkboxes in the workspace sidebar do, what the "..." and partially-visible "Ne[w]" buttons next to the workspace path do.
+- aura_harness/state/types.py — exact fields on TaskSpec, Plan, Slice, SliceContract. Don't assume; verify. In particular, check whether Slice has a target_path field, whether it has a depends_on field, and what the id types/conventions are across these dataclasses.
+- aura_harness/stations/base.py and the existing CriticStation/WorkerStation from dispatch 3 — for the Station metadata pattern and the _genealogy() helper.
+- aura_harness/backend/protocol.py and cloud_http.py — confirm response_format is plumbed through to the openai SDK on the cloud path. It is, per dispatch 4, but verify.
 
-Problems to fix:
+Slice target_path field
 
-1. The QGroupBox treatment with the cyan/teal border and the tiny label overlapping the top edge ("Planner", "Validation") looks dated and hard to read. Replace with a cleaner section style — a regular bold label above each section, separated by subtle spacing or a thin horizontal rule. Drop the box borders entirely on these sections.
+If Slice does not currently have a target_path field, add one as part of this dispatch. It's optional (str | None) for backward compatibility with whatever dispatch 3's executor produced, but the planner always populates it. Update aura_harness/state/types.py and aura_harness/state/__init__.py exports if needed. Update docs/STATE_SCHEMA.md to describe target_path in one sentence.
 
-2. The two text input areas have similar vague placeholders ("Describe what you want to plan..." and "Describe what you want built..."). The visual treatment doesn't communicate that one is for the planner and one is for the worker (or whatever the actual semantics are — figure out from the code). Re-label both inputs with concrete labels above them describing what each input drives, and what stage of the pipeline runs when its Send button is clicked. Same for the two model dropdowns — each should have a label like "Planner model" / "Worker model" (or the accurate names based on code semantics).
+aura_harness/stations/planner.py
 
-3. The two Send buttons need distinct labels matching what each does. If one runs the planner and the other runs the worker, label them "Run Planner" and "Run Worker" (or whatever the accurate verbs are based on the code). "Send" twice is meaningless.
+PlannerStation class. Constructor:
+- name: str = "planner"
+- backend: Backend
+- model: str — caller passes the model string (e.g. "deepseek-v4-flash" for cloud, "gpt-oss:20b" for local)
+- temperature: float = 0.2
+- max_parse_retries: int = 1
 
-4. "Commit Generate" — figure out what this does from the code and rename to something readable. If it commits the plan and triggers generation, "Commit & Generate" or "Approve Plan" or whatever fits.
+Signature:
+- run(task_spec: TaskSpec) -> Plan
 
-5. The Validation section as drawn is just a thin strip with a single checkbox and an empty area below it. Either: (a) if validation has real controls/output, lay them out properly with adequate vertical space; (b) if it's just a toggle, fold the checkbox into the worker section as a single labeled checkbox row, drop the standalone section.
+Internal flow:
+1. Render the planner prompt from task_spec.description (and any other relevant TaskSpec fields). Use the prompt template file (see below).
+2. Call backend.chat() with messages=[{"role": "system", "content": <planner system prompt>}, {"role": "user", "content": <rendered task>}], response_format={"type": "json_object"}, temperature, model. response_format is a no-op on LocalOllamaBackend (per dispatch 1) and the prompt itself has to coerce JSON output for the local path; that's expected and the prompt should be written to work either way.
+3. Parse the response text as JSON. On parse failure: retry up to max_parse_retries times by appending a follow-up user message {"role": "user", "content": <parse error feedback, asking for valid JSON only>}. After retries exhausted, raise BackendError with the last parse error.
+4. Validate the parsed JSON against the Plan/Slice schema:
+   - Top-level object has a "slices" array with at least one entry.
+   - Each slice has the fields the dataclass requires (id, description, target_path, contract.expected_symbols, contract.forbidden_imports).
+   - Slice ids are unique.
+   - Validation failures get one retry the same way parse failures do (feedback message → re-call). After exhaustion, raise.
+5. Construct frozen Plan / Slice / SliceContract dataclasses from the validated JSON.
+6. Stamp genealogy on the Plan: produced_by_station="planner", produced_by_backend=self.backend.name, produced_at=<datetime, matching the convention used elsewhere>, seed=None, input_ref=task_spec.id (or whatever the TaskSpec identifier field is — use the actual field name from types.py).
+7. Return the Plan.
 
-6. The workspace sidebar header gets truncated — the path "C:\Projects" runs into the "..." button and partially shows "Ne" of what's probably a "New" button. Lay out the header so the path has its own row (truncated with ellipsis if too long, with the full path on hover via tooltip) and the action buttons are on a second row or arranged so neither clips the other.
+Plan-level critic is explicitly out of scope. Don't add hooks for it. Keep the return type `Plan`, not `Plan | CritiqueReport`. When plan-level critic lands later, we'll change the signature then.
 
-7. The empty middle area between the Planner section and the Validation section — figure out what it's for from the code (output display? plan preview?). Give it a label so its purpose is visible even when empty, and a placeholder/empty-state message ("Plan output will appear here" or similar based on actual purpose).
+aura_harness/stations/prompts/planner.md (or .txt — match whatever convention exists; if no prompts directory exists yet, create it)
 
-8. General consistency: use the same padding/margins across all sections, consistent button heights, consistent font sizes for labels vs. inputs vs. body text. Right now the visual weight is uniform across everything which kills hierarchy.
+The system + user prompt template the station renders. Two sections in the file separated by a clear marker the loader can split on (e.g. `---SYSTEM---` and `---USER---`, or just two files `planner_system.md` and `planner_user.md` — your call, pick the one that fits the existing repo patterns better).
 
-Visual direction:
-- Keep the dark theme — don't switch to light.
-- Drop the heavy cyan accents on borders. Reserve accent color for primary action buttons only (e.g. the main "Run Planner" / "Run Worker" Send buttons, kept blue) and maybe focus rings on inputs.
-- Section dividers should be subtle — either thin neutral-gray horizontal rules or just whitespace.
-- Inputs (QLineEdit, QPlainTextEdit) get a 1px subtle border, slightly lighter background than the window, comfortable internal padding.
-- Bold labels for section headers, regular weight for inline labels next to dropdowns/checkboxes.
-- Buttons: primary action filled blue, secondary actions outlined or flat.
+The system prompt establishes:
+- The role: "You are a software planner. You decompose a task into a small number of slices (typically 2-5 for small projects). Each slice produces one source file."
+- The output contract: must return a single JSON object matching the Plan schema. Include a literal example of the expected JSON structure with all fields populated for a trivial sample task. The example is the schema specification — make it accurate to the dataclasses.
+- Slice quality bar: each slice has a clear single responsibility, expected_symbols lists the public functions/classes the file must expose, forbidden_imports lists modules the file must not import (use this to enforce module boundaries — e.g. a "render" slice forbids importing from a "physics" slice's file, etc.), target_path is a relative path from the workspace root.
+- Compositional constraint: the slices, when implemented and combined, must produce a runnable program. Order of slices is execution order. Later slices may import from earlier slices' target_paths but not vice versa.
+- Style direction: prefer small files, one class or one logical unit per slice, no slice should be more than a few hundred lines of code.
 
-Implementation:
-- Most of this is layout (QVBoxLayout / QHBoxLayout / QFormLayout adjustments) plus a Qt stylesheet (QSS). Prefer adjusting layouts and using a single coherent QSS block applied at the window level over per-widget setStyleSheet calls.
-- Don't introduce new widget libraries. Native Qt widgets with QSS only.
-- Don't change any signal/slot wiring. Don't rename methods. Don't change any state model. Pure visual + layout + labels.
+The user prompt template renders task_spec.description and any other relevant TaskSpec fields. Keep the user prompt minimal — the system prompt does the heavy lifting on schema and quality.
+
+Smoke CLI: aura_harness/stations/planner_smoke.py with __main__
+
+Args:
+- --backend {local,cloud}
+- --model <model_name>
+- --task <task_description_string> OR --task-file <path>
+
+For cloud: read DEEPSEEK_API_KEY from env, build CloudHTTPBackend with DEEPSEEK_BASE_URL.
+For local: build LocalOllamaBackend with default URL.
+
+Builds a TaskSpec from the --task or --task-file content (use sensible defaults for any other required TaskSpec fields). Constructs PlannerStation. Calls run(). Pretty-prints the resulting Plan: task description, slice count, then per-slice id / target_path / description / expected_symbols / forbidden_imports.
+
+If parsing fails, prints the raw model response and the parse error so the user can iterate on the prompt.
+
+Pygame TaskSpec for verification
+
+Save this as a file the user can point --task-file at. Suggested location: bench/tasks/pygame_smallgame/spec.md or similar — match the existing bench task file convention from duplicate_finder.
+
+Content (one paragraph, deliberately under-specified on genre):
+
+"Build a small pygame game runnable with `python main.py`. Single window, keyboard input, some kind of win/lose state. Pick the genre yourself — anything that fits in a few hundred lines. The code should be clean enough to commit: clear module boundaries, no dead code, a brief README in the same directory explaining how to run it. Constraints: pygame and python-stdlib only, no other dependencies."
+
+This is the dispatch-7 task as well. The planner picking the genre is part of the test.
 
 Definition of done:
-- Window opens, all existing actions still work end-to-end (planner runs, worker runs, validation toggles, file checkboxes still select, refresh still refreshes, model dropdowns still populate from Ollama).
-- The QGroupBox-with-overlapping-label treatment is gone.
-- Text inputs and model dropdowns have clear labels distinguishing planner from worker (or whatever the actual stages are).
-- Send buttons have distinct, action-specific labels.
-- Workspace header doesn't truncate the path against adjacent buttons.
-- Validation either has proper layout or is folded into another section.
-- All existing tests pass. No new tests required for this dispatch.
+- aura_harness/stations/planner.py with PlannerStation.
+- Prompt template file(s) under stations/prompts/ or wherever fits the repo convention.
+- Slice.target_path field exists (added if it didn't already), schema doc updated.
+- aura_harness/stations/__init__.py exports PlannerStation.
+- aura_harness/stations/planner_smoke.py CLI runs end-to-end.
+- bench/tasks/pygame_smallgame/spec.md (or matching path) exists with the pygame task description.
+- All 69 existing tests still pass. No new tests required.
+- Running `python -m aura_harness.stations.planner_smoke --backend cloud --model deepseek-v4-flash --task-file bench/tasks/pygame_smallgame/spec.md` against the live API produces a parseable Plan with 2-5 slices, each with target_path, expected_symbols, and forbidden_imports populated. (User runs this — your verification is that the code path works structurally.)
 
-If during the read pass anything is genuinely ambiguous about what a control does and you can't tell from the code, leave a TODO comment in the QSS or layout near it and pick a reasonable label — don't block on it.
+Don't add plan-level critique. Don't add retries beyond parse/validation feedback. Don't add streaming. Don't add RepoMap input. Keep PlannerStation a thin, focused stage.
 
 Make the change described. The dispatch names the files that matter — work those, then stop. Match existing style; type hints everywhere.
