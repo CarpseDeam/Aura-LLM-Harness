@@ -86,6 +86,7 @@ A discrete unit of work within a `Plan`.
 - `slice_id`: Unique identifier.
 - `description`: What this slice implements.
 - `target_files`: Files this slice modifies or creates.
+- `target_path`: Single primary destination file as a workspace-relative string.
 - `depends_on`: IDs of slices that must be completed first.
 - `contract`: `SliceContract` defining expected outcome.
 
@@ -398,6 +399,13 @@ Abstract base class for functional units.
 
 - `name`: (read-only) The name of the station.
 - `backend`: (read-only) The `Backend` used by the station.
+
+### `PlannerStation`
+
+Decomposes a `TaskSpec` into a structured `Plan`.
+
+- `__init__(name: str = "planner", backend: Backend, model: str, temperature: float = 0.2, max_parse_retries: int = 1)`: Initializes the station.
+- `run(task_spec: TaskSpec) -> Plan`: Generates a plan from a task specification.
 
 ### `CriticStation`
 
