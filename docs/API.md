@@ -116,6 +116,26 @@ A review of a `CodeArtifact`, produced by a Critic station.
 - `seed`: Random seed used.
 - `input_ref`: ID of the input (artifact_id).
 
+### `CompileError`
+One file's compile-time integration failure.
+- `file_path`: Workspace-relative path.
+- `error_type`: Failure category tag (e.g., "SyntaxError").
+- `message`: Human-readable description.
+- `line`: 1-based source line number, or None.
+
+### `IntegrationResult`
+Report on materializing a `Plan` to the workspace.
+- `integration_id`: Unique identifier.
+- `success`: True if all artifacts written and compiled.
+- `workspace_path`: Filesystem root written into.
+- `written_files`: Tuple of relative paths written.
+- `compile_errors`: Tuple of `CompileError` objects.
+- `produced_by_station`: Station name.
+- `produced_by_backend`: Backend name (for traceability).
+- `produced_at`: Timestamp.
+- `seed`: Always None.
+- `input_ref`: ID of the input (plan_id).
+
 ### `RunState`
 The root container for a full session state.
 - `run_id`: Unique identifier.
@@ -413,6 +433,13 @@ Wraps `CriticClient` to produce `CritiqueReport` objects.
 
 - `__init__(name: str = "critic", backend: Backend, client: CriticClient)`: Initializes the station.
 - `run(artifact: CodeArtifact, slice: Slice) -> CritiqueReport`: Reviews an artifact and returns a report.
+
+### `IntegratorStation`
+
+Materializes a `Plan`'s artifacts into files and compile-checks them.
+
+- `__init__(backend: Backend, *, name: str = "integrator")`: Initializes the station.
+- `run(plan: Plan, artifacts: tuple[CodeArtifact, ...], workspace_path: str) -> IntegrationResult`: Materializes artifacts and returns a report.
 
 ### `WorkerStation`
 

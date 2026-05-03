@@ -6,8 +6,8 @@
 - **`LocalOllamaBackend`**: Implementation of `Backend` that wraps `OllamaClient` to provide local LLM capabilities via Ollama. Supports both synchronous and streaming chat.
 - **`CloudHTTPBackend`**: Implementation of `Backend` using the OpenAI-compatible SDK (e.g., for DeepSeek). Supports both synchronous and streaming chat with extended timeout handling.
 - **`State Module` (`aura_harness.state`)**: Provides a typed, immutable schema for the system state (`RunState`, `Plan`, `CodeArtifact`, etc.). Includes a `RepoMap` builder that uses AST parsing to map workspace symbols.
-- **`Station` (`aura_harness.stations`)**: Abstract base for functional units. Includes `PlannerStation` for task decomposition, `CriticStation` for reviews, and `WorkerStation` for code generation with internal reflexion loops.
-- **`Pipeline` (`aura_harness.pipeline`)**: Orchestration layer. Includes `LinearExecutor` which processes a `Plan` sequentially, and a CLI for running tasks through the pipeline.
+- **`Station` (`aura_harness.stations`)**: Abstract base for functional units. Includes `PlannerStation` for task decomposition, `CriticStation` for reviews, `WorkerStation` for code generation with internal reflexion loops, and `IntegratorStation` for materializing plans to disk.
+- **`Pipeline` (`aura_harness.pipeline`)**: Orchestration layer. Includes `LinearExecutor` which processes a `Plan` sequentially by dispatching to workers and an integrator, and a CLI for running tasks through the pipeline.
 - **`OllamaClient`**: Low-level client for interacting with the Ollama API. Manages defaults such as the `default_model`. Supports both completion and chat endpoints, as well as explicit model unloading to manage VRAM.
 - **`PlannerClient`**: Stateless service for managing conversational interactions with a planner model. Backed by a `:class:Backend`.
 - **`CandidateGenerator` (the "lab")**: Orchestrates multiple parallel calls to a `:class:Backend` to generate multiple candidates for a single prompt.
@@ -43,6 +43,12 @@
     - If a `ValidationSpec` was provided, `BatchWorker` calls `score_batch()` on the results.
     - Results (raw or scored) are returned to `MainWindow` via signals and rendered as interactive widgets.
     - User can "Apply" a candidate, writing its code back to the workspace via `WorkspaceManager`.
+
+## Pipeline Execution Flow
+
+1. **Decomposition**: `PlannerStation` takes a `TaskSpec` and produces a `Plan` consisting of multiple `Slice`s.
+2. **Generation**: `WorkerStation` processes each `Slice` sequentially (via `LinearExecutor`) or based on dependencies, generating `CodeArtifact`s (potentially through reflexion with `CriticStation`).
+3. **Integration**: `IntegratorStation` takes the full set of `CodeArtifact`s and materializes them into the workspace, performing `py_compile` checks to ensure structural integrity and producing an `IntegrationResult`.
 
 ## CLI Interface
 

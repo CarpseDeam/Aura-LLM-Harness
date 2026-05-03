@@ -2,6 +2,7 @@
 
 All notable changes to this project.
 
+- 2026-05-03: feat: introduce `IntegratorStation` to materialize plans into the workspace with automated `py_compile` checking.
 - 2026-05-03: feat: introduce `PlannerStation` to decompose tasks into structured plans and add `target_path` to `Slice` for explicit artifact destination.
 - 2026-05-03: feat: GUI cleanup pass for the main window with improved layout, action-specific labels, and unified dark theme.
 - 2026-05-02: feat: extend `Backend` protocol with `chat_stream` and implement `CloudHTTPBackend` (DeepSeek) via OpenAI SDK.
