@@ -236,6 +236,77 @@ class CritiqueReport:
 
 
 @dataclass(frozen=True)
+class CompileError:
+    """One file's compile-time integration failure.
+
+    Emitted by :class:`IntegrationResult` when the integrator cannot
+    produce a usable workspace from the worker artifacts. ``error_type``
+    is a short tag (``"SyntaxError"``, ``"ImportError"``,
+    ``"ContractViolation"``) so consumers can switch on the failure
+    category without parsing ``message``.
+
+    Attributes:
+        file_path: Workspace-relative path to the offending file. For
+            plan-level failures (e.g. mismatched artifact set, cyclic
+            dependencies) consumers may pass an empty string or a
+            placeholder.
+        error_type: Failure category tag.
+        message: Human-readable description of the failure.
+        line: 1-based source line number where the error was detected,
+            when available; ``None`` for failures that have no obvious
+            line locus (missing file, missing artifact).
+    """
+
+    file_path: str
+    error_type: str
+    message: str
+    line: int | None
+
+
+@dataclass(frozen=True)
+class IntegrationResult:
+    """The integrator station's report on materializing a :class:`Plan`.
+
+    Genealogy fields trace this report back to the integrator station,
+    the backend whose worker outputs are being assembled (held purely
+    for traceability — the integrator does not call the model), and the
+    consumed :class:`Plan`.
+
+    Attributes:
+        integration_id: Stable identifier for this integration run.
+        success: ``True`` when every artifact was written and every
+            ``.py`` file compiled without errors.
+        workspace_path: Filesystem root the integrator wrote into.
+            Stored as a string for cross-platform serialization.
+        written_files: Workspace-relative paths actually written, in
+            write order. Populated even on a partial failure so callers
+            can inspect what landed before the first error.
+        compile_errors: Per-file failures collected during
+            :func:`py_compile.compile` checking, plus any plan-level
+            contract violations the integrator caught up front. Empty
+            tuple on success.
+        produced_by_station: Name of the station that emitted the
+            result (``"integrator"``).
+        produced_by_backend: Name of the backend whose worker outputs
+            were integrated. The integrator itself makes no model calls.
+        produced_at: UTC timestamp at the moment of emission.
+        seed: Always ``None``; the integrator does no sampling.
+        input_ref: ``plan_id`` of the consumed :class:`Plan`.
+    """
+
+    integration_id: str
+    success: bool
+    workspace_path: str
+    written_files: tuple[str, ...]
+    compile_errors: tuple[CompileError, ...]
+    produced_by_station: str
+    produced_by_backend: str
+    produced_at: datetime
+    seed: int | None
+    input_ref: str
+
+
+@dataclass(frozen=True)
 class RunState:
     """The full state threaded through a single harness run.
 

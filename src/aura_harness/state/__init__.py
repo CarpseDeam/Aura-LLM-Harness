@@ -9,9 +9,11 @@ from __future__ import annotations
 from aura_harness.state.repo_map import build_repo_map
 from aura_harness.state.types import (
     CodeArtifact,
+    CompileError,
     CritiqueReport,
     FileSymbols,
     FileWrite,
+    IntegrationResult,
     Plan,
     RepoMap,
     RunState,
@@ -22,9 +24,11 @@ from aura_harness.state.types import (
 
 __all__ = [
     "CodeArtifact",
+    "CompileError",
     "CritiqueReport",
     "FileSymbols",
     "FileWrite",
+    "IntegrationResult",
     "Plan",
     "RepoMap",
     "RunState",

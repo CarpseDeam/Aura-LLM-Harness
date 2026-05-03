@@ -197,6 +197,49 @@ the genealogy field, present on every produced thing in the same shape.
 know "for critiques the input is an artifact." Both fields hold the
 same value, but they document different intents.
 
+### `CompileError`
+
+A single file-level failure surfaced by the integrator. `error_type` is a short
+tag the integrator picks (`"SyntaxError"`, `"ImportError"`,
+`"ContractViolation"`) so consumers can switch on category without parsing the
+free-form `message`. `line` is 1-based when available.
+
+```python
+@dataclass(frozen=True)
+class CompileError:
+    file_path: str          # workspace-relative
+    error_type: str
+    message: str
+    line: int | None
+```
+
+### `IntegrationResult`
+
+The integrator station's report on materializing one `Plan` into a workspace.
+Produced by the integrator after every per-slice `CodeArtifact` has been written
+to its `target_path` and the resulting Python files have been
+`py_compile`-checked. Carries the same five genealogy fields as the other
+produced types; `seed` is always `None` because the integrator makes no model
+calls. `produced_by_backend` is held purely for traceability — it names the
+backend whose worker outputs are being assembled, not a backend the integrator
+itself dispatches against.
+
+```python
+@dataclass(frozen=True)
+class IntegrationResult:
+    integration_id: str
+    success: bool
+    workspace_path: str
+    written_files: tuple[str, ...]    # relative, in write order
+    compile_errors: tuple[CompileError, ...]
+    # genealogy
+    produced_by_station: str
+    produced_by_backend: str
+    produced_at: datetime
+    seed: int | None
+    input_ref: str   # plan_id
+```
+
 ### `RunState`
 
 The whole state of one run, threaded through stations. Each station
