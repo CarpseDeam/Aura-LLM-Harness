@@ -2,6 +2,7 @@
 
 All notable changes to this project.
 
+- 2026-05-02: feat: extend `Backend` protocol with `chat_stream` and implement `CloudHTTPBackend` (DeepSeek) via OpenAI SDK.
 - 2026-05-02: feat: introduce Station and Pipeline abstractions, with Worker and Critic stations and a LinearExecutor.
 - 2026-05-02: feat: implement typed state schema (RunState, Plan, CodeArtifact, etc.) and AST-based RepoMap builder.
 - 2026-05-02: refactor: introduce generic `Backend` abstraction for LLM providers, transitioning from direct `OllamaClient` usage.

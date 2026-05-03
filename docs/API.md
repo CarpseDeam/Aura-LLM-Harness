@@ -9,6 +9,7 @@ Provider-agnostic chat backend protocol.
 - `name`: (read-only) Stable backend identifier used for genealogy stamping.
 - `default_model`: (read-only) Model name used when callers do not pin one explicitly.
 - `chat(messages, model, temperature=0.2, seed=None, max_tokens=None, ...)`: Runs a non-streaming chat completion and returns a `CompletionResult`.
+- `chat_stream(messages, model, temperature=0.2, seed=None, max_tokens=None, ...)`: Runs a streaming chat completion and yields `StreamChunk` objects.
 
 ### `LocalOllamaBackend`
 
@@ -17,6 +18,16 @@ Implementation of `Backend` backed by a local Ollama server.
 - `__init__(client: OllamaClient)`: Wraps an existing `OllamaClient`.
 - `name`: Returns "local_ollama".
 - `client`: (read-only) Access to the underlying `OllamaClient`.
+- `chat_stream(...)`: Implementation of streaming via Ollama's `/api/chat`.
+
+### `CloudHTTPBackend`
+
+Implementation of `Backend` using the OpenAI-compatible SDK (e.g., DeepSeek).
+
+- `__init__(base_url, api_key, name="cloud", timeout=900.0)`: Initializes the cloud backend.
+- `name`: Returns the configured name (default "cloud").
+- `chat(...)`: Implementation of non-streaming chat via OpenAI SDK.
+- `chat_stream(...)`: Implementation of streaming chat via OpenAI SDK.
 
 ### `CompletionResult`
 
@@ -28,6 +39,13 @@ Unified shape for chat completion results.
 - `completion_tokens`: Tokens in the completion.
 - `total_duration_ms`: Wall-clock duration of the call.
 - `raw`: Provider's raw response payload.
+
+### `StreamChunk`
+
+One chunk produced by `Backend.chat_stream`.
+
+- `delta`: Incremental text for this chunk.
+- `final`: `None` while streaming; populated on the terminal chunk with the full `CompletionResult`.
 
 ## `aura_harness.state`
 

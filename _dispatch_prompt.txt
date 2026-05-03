@@ -1,92 +1,49 @@
-Dispatch 4: streaming on the Backend protocol + CloudHTTPBackend (DeepSeek as first concrete cloud impl).
-
-Goal: extend the Backend contract with chat_stream(), implement it on LocalOllamaBackend additively, add CloudHTTPBackend using the openai SDK pointed at DeepSeek's OpenAI-compatible endpoint. End state: both backends satisfy the extended Protocol; the cloud backend is independently runnable via a smoke CLI before any station wiring.
+GUI cleanup pass on the Aura main window. Functional behavior stays intact — this is visual and layout only, no semantic changes to what the controls do.
 
 Read first:
-- aura_harness/backend/protocol.py and local_ollama.py for the current Backend shape, CompletionResult fields, and BackendError.
-- pyproject.toml (or requirements.txt — wherever deps actually live) to add the openai SDK.
-- DeepSeek's current API docs for two specific things: the exact parameter name for thinking mode (verify, don't guess — the OpenAI SDK passes it via extra_body or as a top-level kwarg depending on what DeepSeek expects), and the current stable model strings (deepseek-v4-flash and deepseek-v4-pro per the handoff, but confirm).
+- The PySide6 GUI module (probably aura_harness/gui/ or aura_harness/ui/ — find it). Read every file that composes the main window.
+- Understand the semantics of each control before changing it: what the Planner text area does, what the second text area at the bottom does (currently "Describe what you want built..."), what the two Send buttons each trigger, what "Commit Generate" does, what the Validation checkbox toggles, what the two model dropdowns each control, what the N: spinner is for, what the file-list checkboxes in the workspace sidebar do, what the "..." and partially-visible "Ne[w]" buttons next to the workspace path do.
 
-StreamChunk
+Problems to fix:
 
-Add a frozen dataclass StreamChunk in backend/protocol.py alongside CompletionResult:
-- delta: str — incremental text for this chunk; "" allowed
-- final: CompletionResult | None — None during streaming, populated on the terminal chunk with the full accumulated CompletionResult
+1. The QGroupBox treatment with the cyan/teal border and the tiny label overlapping the top edge ("Planner", "Validation") looks dated and hard to read. Replace with a cleaner section style — a regular bold label above each section, separated by subtle spacing or a thin horizontal rule. Drop the box borders entirely on these sections.
 
-The terminal chunk may carry both delta and final, or final with delta="" — either shape is fine. Caller pattern is "iterate chunks, accumulate or display deltas, capture final when chunk.final is not None."
+2. The two text input areas have similar vague placeholders ("Describe what you want to plan..." and "Describe what you want built..."). The visual treatment doesn't communicate that one is for the planner and one is for the worker (or whatever the actual semantics are — figure out from the code). Re-label both inputs with concrete labels above them describing what each input drives, and what stage of the pipeline runs when its Send button is clicked. Same for the two model dropdowns — each should have a label like "Planner model" / "Worker model" (or the accurate names based on code semantics).
 
-Backend Protocol: add chat_stream
+3. The two Send buttons need distinct labels matching what each does. If one runs the planner and the other runs the worker, label them "Run Planner" and "Run Worker" (or whatever the accurate verbs are based on the code). "Send" twice is meaningless.
 
-Same kwargs as chat(), returns Iterator[StreamChunk]:
+4. "Commit Generate" — figure out what this does from the code and rename to something readable. If it commits the plan and triggers generation, "Commit & Generate" or "Approve Plan" or whatever fits.
 
-chat_stream(messages, *, model, temperature=0.2, seed=None, max_tokens=None, response_format=None, reasoning=False) -> Iterator[StreamChunk]
+5. The Validation section as drawn is just a thin strip with a single checkbox and an empty area below it. Either: (a) if validation has real controls/output, lay them out properly with adequate vertical space; (b) if it's just a toggle, fold the checkbox into the worker section as a single labeled checkbox row, drop the standalone section.
 
-Semantic contract between the two methods: consuming chat_stream() to completion and taking chunk.final must produce a CompletionResult equivalent to calling chat() with the same args. Implementations are free to share code or not; the contract is what matters.
+6. The workspace sidebar header gets truncated — the path "C:\Projects" runs into the "..." button and partially shows "Ne" of what's probably a "New" button. Lay out the header so the path has its own row (truncated with ellipsis if too long, with the full path on hover via tooltip) and the action buttons are on a second row or arranged so neither clips the other.
 
-LocalOllamaBackend.chat_stream
+7. The empty middle area between the Planner section and the Validation section — figure out what it's for from the code (output display? plan preview?). Give it a label so its purpose is visible even when empty, and a placeholder/empty-state message ("Plan output will appear here" or similar based on actual purpose).
 
-Hits Ollama's /api/chat with stream=true. Each JSON line in the response becomes StreamChunk(delta=msg.content, final=None). The line with done=true builds CompletionResult from total_duration, prompt_eval_count, eval_count, raw, and yields StreamChunk(delta="", final=result).
+8. General consistency: use the same padding/margins across all sections, consistent button heights, consistent font sizes for labels vs. inputs vs. body text. Right now the visual weight is uniform across everything which kills hierarchy.
 
-Leave LocalOllamaBackend.chat() alone. Its current non-streaming /api/chat path is what dispatch 3's regression check ran against; don't reroute it through chat_stream(). chat_stream is purely additive.
+Visual direction:
+- Keep the dark theme — don't switch to light.
+- Drop the heavy cyan accents on borders. Reserve accent color for primary action buttons only (e.g. the main "Run Planner" / "Run Worker" Send buttons, kept blue) and maybe focus rings on inputs.
+- Section dividers should be subtle — either thin neutral-gray horizontal rules or just whitespace.
+- Inputs (QLineEdit, QPlainTextEdit) get a 1px subtle border, slightly lighter background than the window, comfortable internal padding.
+- Bold labels for section headers, regular weight for inline labels next to dropdowns/checkboxes.
+- Buttons: primary action filled blue, secondary actions outlined or flat.
 
-backend/cloud_http.py — new file
-
-CloudHTTPBackend class. Constructor:
-- base_url: str
-- api_key: str
-- name: str = "cloud"
-- timeout: float = 900.0 (DeepSeek can hold connections open during queueing; default openai timeout of 600s is borderline)
-
-Stores an openai.OpenAI client built from base_url, api_key, timeout. Exposes self.name for genealogy.
-
-Implements both:
-- chat(messages, *, model, ...) -> CompletionResult: client.chat.completions.create(stream=False, ...), shape the response into CompletionResult. response_format passes through to the SDK (DeepSeek supports {"type": "json_object"}). reasoning=True maps to DeepSeek's thinking mode parameter — verify the exact name from current docs. temperature, seed, max_tokens are standard OpenAI params.
-- chat_stream(messages, *, model, ...) -> Iterator[StreamChunk]: client.chat.completions.create(stream=True, stream_options={"include_usage": True}, ...). Iterate chunks, yield StreamChunk(delta=chunk.choices[0].delta.content or "", final=None). On the final chunk (finish_reason set, usage block populated), accumulate the full text from prior deltas and yield StreamChunk(delta="", final=CompletionResult(...)) using the usage block for token counts.
-
-DeepSeek's keep-alive/empty SSE events are handled transparently by the openai SDK iterator — no special filtering needed.
-
-Errors: catch openai.APIError and its subclasses, re-raise as BackendError (the existing unified type from dispatch 1) preserving the original message and status.
-
-backend/cloud_constants.py — DeepSeek defaults
-
-A small module exposing:
-- DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-- Optionally model name constants (DEEPSEEK_FLASH, DEEPSEEK_PRO) — nice but not required; strings are fine.
-
-Future cloud providers (Anthropic, Together, OpenRouter, etc.) will get their own constants files using the same CloudHTTPBackend class.
-
-Dependency
-
-Add openai to pyproject.toml (or requirements.txt). Pin to a recent stable version. Run install if needed.
-
-Smoke CLI
-
-backend/smoke.py with a __main__ block. Args:
-- --backend {local,cloud}
-- --model <model_name>
-- --prompt <text>
-- --stream / no flag for non-streaming
-- --reasoning / no flag
-
-For --backend cloud: read DEEPSEEK_API_KEY from env, construct CloudHTTPBackend with DEEPSEEK_BASE_URL.
-For --backend local: construct LocalOllamaBackend with default URL.
-
-With --stream: iterate chat_stream(), print deltas as they arrive (no buffering — flush on each delta), print the final CompletionResult's token counts and duration at the end.
-Without --stream: call chat(), print result text, then token counts and duration.
-
-This is the verification path. User will run it against both backends to confirm cloud auth, streaming, keep-alive tolerance, and thinking mode all work before any station wiring touches CloudHTTPBackend.
+Implementation:
+- Most of this is layout (QVBoxLayout / QHBoxLayout / QFormLayout adjustments) plus a Qt stylesheet (QSS). Prefer adjusting layouts and using a single coherent QSS block applied at the window level over per-widget setStyleSheet calls.
+- Don't introduce new widget libraries. Native Qt widgets with QSS only.
+- Don't change any signal/slot wiring. Don't rename methods. Don't change any state model. Pure visual + layout + labels.
 
 Definition of done:
-- StreamChunk dataclass in backend/protocol.py.
-- Backend Protocol declares chat_stream().
-- LocalOllamaBackend.chat_stream() implemented; chat() unchanged.
-- backend/cloud_http.py with CloudHTTPBackend implementing both methods via openai SDK.
-- backend/cloud_constants.py with DEEPSEEK_BASE_URL.
-- openai added as a dependency, installable.
-- backend/smoke.py runs end-to-end against both backends with and without --stream.
-- All existing 69 tests still pass.
-- No behavior change in the chat() path for either backend — duplicate_finder regression remains valid.
+- Window opens, all existing actions still work end-to-end (planner runs, worker runs, validation toggles, file checkboxes still select, refresh still refreshes, model dropdowns still populate from Ollama).
+- The QGroupBox-with-overlapping-label treatment is gone.
+- Text inputs and model dropdowns have clear labels distinguishing planner from worker (or whatever the actual stages are).
+- Send buttons have distinct, action-specific labels.
+- Workspace header doesn't truncate the path against adjacent buttons.
+- Validation either has proper layout or is folded into another section.
+- All existing tests pass. No new tests required for this dispatch.
 
-No new tests required for the cloud backend; the smoke CLI hitting the real API is the meaningful verification, and the user will run it.
+If during the read pass anything is genuinely ambiguous about what a control does and you can't tell from the code, leave a TODO comment in the QSS or layout near it and pick a reasonable label — don't block on it.
 
 Make the change described. The dispatch names the files that matter — work those, then stop. Match existing style; type hints everywhere.

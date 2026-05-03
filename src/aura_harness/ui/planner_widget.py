@@ -32,15 +32,22 @@ from aura_harness.ui.planner_worker import PlannerWorker
 
 logger = logging.getLogger(__name__)
 
-PLANNER_INPUT_PLACEHOLDER: Final[str] = "Describe what you want to plan..."
+PLANNER_INPUT_PLACEHOLDER: Final[str] = (
+    "Sketch the task — the planner asks clarifying questions, then drafts a plan."
+)
+PLANNER_INPUT_LABEL: Final[str] = "Planner prompt"
 PLANNER_HEADER_TEXT: Final[str] = "Planner"
+PLANNER_TRANSCRIPT_EMPTY_TEXT: Final[str] = (
+    "Conversation with the planner appears here. Send a prompt to begin."
+)
 PLANNER_INPUT_MIN_HEIGHT: Final[int] = 72
 PLANNER_INPUT_MAX_HEIGHT: Final[int] = 144
 TRANSCRIPT_MIN_HEIGHT: Final[int] = 200
 USER_PREFIX: Final[str] = "You"
 ASSISTANT_PREFIX: Final[str] = "Planner"
 COMMIT_BUTTON_LABEL: Final[str] = "Commit & Generate"
-SEND_BUTTON_LABEL: Final[str] = "Send"
+SEND_BUTTON_LABEL: Final[str] = "Run Planner"
+PLANNER_MODEL_LABEL: Final[str] = "Planner model:"
 
 
 class PlannerWidget(QWidget):
@@ -94,9 +101,7 @@ class PlannerWidget(QWidget):
 
     def _build_ui(self) -> None:
         header = QLabel(PLANNER_HEADER_TEXT)
-        header.setStyleSheet(
-            f"color: {theme.ACCENT}; font-weight: 600; font-size: {theme.FONT_SIZE_PT + 1}pt;"
-        )
+        header.setProperty("role", "section")
 
         self._transcript_container: QWidget = QWidget()
         self._transcript_layout: QVBoxLayout = QVBoxLayout(self._transcript_container)
@@ -104,6 +109,10 @@ class PlannerWidget(QWidget):
             theme.PADDING_MD, theme.PADDING_MD, theme.PADDING_MD, theme.PADDING_MD
         )
         self._transcript_layout.setSpacing(theme.PADDING_SM)
+        self._transcript_empty: QLabel = QLabel(PLANNER_TRANSCRIPT_EMPTY_TEXT)
+        self._transcript_empty.setProperty("role", "empty")
+        self._transcript_empty.setWordWrap(True)
+        self._transcript_layout.addWidget(self._transcript_empty)
         self._transcript_layout.addStretch(1)
 
         self._transcript: QScrollArea = QScrollArea()
@@ -112,16 +121,23 @@ class PlannerWidget(QWidget):
         self._transcript.setMinimumHeight(TRANSCRIPT_MIN_HEIGHT)
         self._transcript.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
+        input_label = QLabel(PLANNER_INPUT_LABEL)
+        input_label.setProperty("role", "inline")
+
         self.input: QPlainTextEdit = QPlainTextEdit()
         self.input.setFont(self._mono)
         self.input.setPlaceholderText(PLANNER_INPUT_PLACEHOLDER)
         self.input.setMinimumHeight(PLANNER_INPUT_MIN_HEIGHT)
         self.input.setMaximumHeight(PLANNER_INPUT_MAX_HEIGHT)
 
+        model_label = QLabel(PLANNER_MODEL_LABEL)
+        model_label.setProperty("role", "inline")
+
         self.model_combo: QComboBox = QComboBox()
         self.model_combo.currentTextChanged.connect(self._on_model_changed)
 
         self.send_button: QPushButton = QPushButton(SEND_BUTTON_LABEL)
+        self.send_button.setProperty("primary", True)
         self.send_button.clicked.connect(self._on_send)
 
         self.commit_button: QPushButton = QPushButton(COMMIT_BUTTON_LABEL)
@@ -129,16 +145,17 @@ class PlannerWidget(QWidget):
 
         controls = QHBoxLayout()
         controls.setSpacing(theme.PADDING_SM)
-        controls.addWidget(QLabel("Model:"))
+        controls.addWidget(model_label)
         controls.addWidget(self.model_combo, 1)
-        controls.addWidget(self.send_button)
         controls.addWidget(self.commit_button)
+        controls.addWidget(self.send_button)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(theme.PADDING_SM)
         layout.addWidget(header)
         layout.addWidget(self._transcript, 1)
+        layout.addWidget(input_label)
         layout.addWidget(self.input)
         layout.addLayout(controls)
 
@@ -288,6 +305,8 @@ class PlannerWidget(QWidget):
         self._append_styled_line(text, theme.MUTED)
 
     def _add_transcript_widget(self, widget: QWidget) -> None:
+        if self._transcript_empty.isVisible():
+            self._transcript_empty.setVisible(False)
         index = max(self._transcript_layout.count() - 1, 0)
         self._transcript_layout.insertWidget(index, widget)
         self._transcript.ensureWidgetVisible(widget)

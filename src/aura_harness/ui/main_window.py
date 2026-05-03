@@ -9,10 +9,10 @@ from typing import Final
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QFontDatabase, QFontMetrics, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -43,7 +43,17 @@ from aura_harness.workspace import WorkspaceError, WorkspaceManager
 logger = logging.getLogger(__name__)
 
 WINDOW_TITLE: Final[str] = "Aura LLM Harness"
-INPUT_PLACEHOLDER: Final[str] = "Describe what you want built..."
+INPUT_PLACEHOLDER: Final[str] = (
+    "Describe the function or feature to build — Run Worker generates N candidates."
+)
+WORKER_PROMPT_LABEL: Final[str] = "Worker prompt"
+WORKER_OUTPUT_LABEL: Final[str] = "Worker output"
+WORKER_OUTPUT_EMPTY_TEXT: Final[str] = (
+    "Generated candidates appear here once Run Worker produces a batch."
+)
+WORKER_MODEL_LABEL: Final[str] = "Worker model:"
+WORKSPACE_LABEL: Final[str] = "Workspace"
+VALIDATE_LABEL: Final[str] = "Validate output (parse, expected symbols, optional test code)"
 SYMBOLS_PLACEHOLDER: Final[str] = "comma-separated, e.g. add, helper"
 TEST_PLACEHOLDER: Final[str] = "assert add(1,2) == 3"
 DEFAULT_N: Final[int] = 3
@@ -52,7 +62,7 @@ N_MAX: Final[int] = 10
 TEST_TIMEOUT_SECONDS: Final[float] = 10.0
 ERROR_TRUNCATE: Final[int] = 200
 SIDEBAR_WIDTH: Final[int] = 250
-WORKSPACE_PATH_ELIDE_WIDTH: Final[int] = 180
+WORKSPACE_PATH_ELIDE_WIDTH: Final[int] = 230
 CONTEXT_FILE_BYTE_LIMIT: Final[int] = 100 * 1024
 DEFAULT_APPLY_FILENAME: Final[str] = "candidate.py"
 
@@ -124,26 +134,27 @@ class MainWindow(QMainWindow):
         sidebar = QWidget()
         sidebar.setFixedWidth(SIDEBAR_WIDTH)
 
-        self.workspace_path_label: QLabel = QLabel()
-        self.workspace_path_label.setStyleSheet(f"color: {theme.MUTED};")
-        self.workspace_path_label.setToolTip(str(self._workspace.root))
+        header_label = QLabel(WORKSPACE_LABEL)
+        header_label.setProperty("role", "section")
 
-        pick_button = QPushButton("...")
-        pick_button.setFixedWidth(36)
-        pick_button.setMinimumWidth(36)
+        self.workspace_path_label: QLabel = QLabel()
+        self.workspace_path_label.setProperty("role", "path")
+        self.workspace_path_label.setToolTip(str(self._workspace.root))
+        self.workspace_path_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+
+        pick_button = QPushButton("Choose…")
         pick_button.clicked.connect(self._on_pick_workspace)
 
-        new_button = QPushButton("New")
-        new_button.setFixedWidth(56)
-        new_button.setMinimumWidth(56)
+        new_button = QPushButton("New project")
         new_button.clicked.connect(self._on_new_project)
 
-        header_row = QHBoxLayout()
-        header_row.setSpacing(theme.PADDING_SM)
-        header_row.addWidget(QLabel("Workspace:"))
-        header_row.addWidget(self.workspace_path_label, 1)
-        header_row.addWidget(pick_button)
-        header_row.addWidget(new_button)
+        action_row = QHBoxLayout()
+        action_row.setSpacing(theme.PADDING_SM)
+        action_row.addWidget(pick_button)
+        action_row.addWidget(new_button)
+        action_row.addStretch(1)
 
         self.file_list: QListWidget = QListWidget()
 
@@ -153,7 +164,9 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(theme.PADDING_SM)
-        layout.addLayout(header_row)
+        layout.addWidget(header_label)
+        layout.addWidget(self.workspace_path_label)
+        layout.addLayout(action_row)
         layout.addWidget(self.file_list, 1)
         layout.addWidget(refresh_button)
         return sidebar
@@ -164,16 +177,8 @@ class MainWindow(QMainWindow):
         self.planner_widget: PlannerWidget = PlannerWidget(self._client, self._planner)
         self.planner_widget.commit_requested.connect(self._on_planner_commit)
 
-        planner_frame = QFrame()
-        planner_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        planner_frame.setStyleSheet(
-            f"QFrame {{ border: 1px solid {theme.BORDER}; border-radius: {theme.RADIUS}px; }}"
-        )
-        planner_frame_layout = QVBoxLayout(planner_frame)
-        planner_frame_layout.setContentsMargins(
-            theme.PADDING_MD, theme.PADDING_MD, theme.PADDING_MD, theme.PADDING_MD
-        )
-        planner_frame_layout.addWidget(self.planner_widget)
+        output_header = QLabel(WORKER_OUTPUT_LABEL)
+        output_header.setProperty("role", "section")
 
         self._output_container: QWidget = QWidget()
         self._output_layout: QVBoxLayout = QVBoxLayout(self._output_container)
@@ -181,6 +186,10 @@ class MainWindow(QMainWindow):
             theme.PADDING_MD, theme.PADDING_MD, theme.PADDING_MD, theme.PADDING_MD
         )
         self._output_layout.setSpacing(theme.PADDING_SM)
+        self._output_empty: QLabel = QLabel(WORKER_OUTPUT_EMPTY_TEXT)
+        self._output_empty.setProperty("role", "empty")
+        self._output_empty.setWordWrap(True)
+        self._output_layout.addWidget(self._output_empty)
         self._output_layout.addStretch(1)
 
         self.output: QScrollArea = QScrollArea()
@@ -188,7 +197,11 @@ class MainWindow(QMainWindow):
         self.output.setWidgetResizable(True)
         self.output.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-        self.validation_group, self._validation_inner = self._build_validation_group(mono)
+        worker_header = QLabel("Worker")
+        worker_header.setProperty("role", "section")
+
+        prompt_label = QLabel(WORKER_PROMPT_LABEL)
+        prompt_label.setProperty("role", "inline")
 
         self.input: QPlainTextEdit = QPlainTextEdit()
         self.input.setFont(mono)
@@ -196,17 +209,28 @@ class MainWindow(QMainWindow):
         self.input.setMinimumHeight(theme.INPUT_MIN_HEIGHT)
         self.input.setMaximumHeight(theme.INPUT_MIN_HEIGHT * 2)
 
+        self.validation_group, self._validation_details = self._build_validation_section(mono)
+
+        model_label = QLabel(WORKER_MODEL_LABEL)
+        model_label.setProperty("role", "inline")
+        n_label = QLabel("N:")
+        n_label.setProperty("role", "inline")
+
         self.model_combo: QComboBox = QComboBox()
         self.n_spin: QSpinBox = QSpinBox()
         self.n_spin.setRange(N_MIN, N_MAX)
         self.n_spin.setValue(DEFAULT_N)
+        self.n_spin.setFixedWidth(64)
 
-        self.send_button: QPushButton = QPushButton("Send")
+        self.send_button: QPushButton = QPushButton("Run Worker")
+        self.send_button.setProperty("primary", True)
         self.send_button.clicked.connect(self._on_submit)
 
         control_row = QHBoxLayout()
-        control_row.addWidget(self.model_combo)
-        control_row.addWidget(QLabel("N:"))
+        control_row.setSpacing(theme.PADDING_SM)
+        control_row.addWidget(model_label)
+        control_row.addWidget(self.model_combo, 1)
+        control_row.addWidget(n_label)
         control_row.addWidget(self.n_spin)
         control_row.addStretch(1)
         control_row.addWidget(self.send_button)
@@ -214,29 +238,52 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(right)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(theme.PADDING_MD)
-        layout.addWidget(planner_frame, 1)
+        layout.addWidget(self.planner_widget, 1)
+        layout.addWidget(self._make_hrule())
+        layout.addWidget(output_header)
         layout.addWidget(self.output, 1)
-        layout.addWidget(self.validation_group)
+        layout.addWidget(self._make_hrule())
+        layout.addWidget(worker_header)
+        layout.addWidget(prompt_label)
         layout.addWidget(self.input)
+        layout.addWidget(self.validation_group)
+        layout.addWidget(self._validation_details)
         layout.addLayout(control_row)
         return right
 
-    def _build_validation_group(self, mono: QFont) -> tuple[QGroupBox, list[QWidget]]:
-        """Build the collapsible Validation group box and return its inner widgets."""
-        group = QGroupBox("Validation")
-        group.setCheckable(True)
-        group.setChecked(False)
+    @staticmethod
+    def _make_hrule() -> QFrame:
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.NoFrame)
+        line.setProperty("role", "hline")
+        line.setFixedHeight(1)
+        return line
+
+    def _build_validation_section(self, mono: QFont) -> tuple[QCheckBox, QWidget]:
+        """Build the validation toggle checkbox and its (initially hidden) details panel."""
+        checkbox = QCheckBox(VALIDATE_LABEL)
+        checkbox.setChecked(False)
+
+        details = QWidget()
+        details_layout = QVBoxLayout(details)
+        details_layout.setContentsMargins(
+            theme.PADDING_LG, 0, 0, 0
+        )
+        details_layout.setSpacing(theme.PADDING_SM)
 
         symbols_label = QLabel("Expected symbols:")
+        symbols_label.setProperty("role", "inline")
         self.symbols_edit: QLineEdit = QLineEdit()
         self.symbols_edit.setPlaceholderText(SYMBOLS_PLACEHOLDER)
         self.symbols_edit.setFont(mono)
 
         symbols_row = QHBoxLayout()
+        symbols_row.setSpacing(theme.PADDING_SM)
         symbols_row.addWidget(symbols_label)
         symbols_row.addWidget(self.symbols_edit, 1)
 
         test_label = QLabel("Test code:")
+        test_label.setProperty("role", "inline")
         test_label.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.test_edit: QPlainTextEdit = QPlainTextEdit()
         self.test_edit.setFont(mono)
@@ -245,23 +292,19 @@ class MainWindow(QMainWindow):
         self.test_edit.setFixedHeight(line_height * 4 + theme.PADDING_LG)
 
         test_row = QHBoxLayout()
+        test_row.setSpacing(theme.PADDING_SM)
         test_row.addWidget(test_label)
         test_row.addWidget(self.test_edit, 1)
 
-        group_layout = QVBoxLayout()
-        group_layout.addLayout(symbols_row)
-        group_layout.addLayout(test_row)
-        group.setLayout(group_layout)
+        details_layout.addLayout(symbols_row)
+        details_layout.addLayout(test_row)
+        details.setVisible(False)
 
-        inner: list[QWidget] = [symbols_label, self.symbols_edit, test_label, self.test_edit]
-        for widget in inner:
-            widget.setVisible(False)
-        group.toggled.connect(self._on_validation_toggled)
-        return group, inner
+        checkbox.toggled.connect(self._on_validation_toggled)
+        return checkbox, details
 
     def _on_validation_toggled(self, checked: bool) -> None:
-        for widget in self._validation_inner:
-            widget.setVisible(checked)
+        self._validation_details.setVisible(checked)
 
     def _populate_models(self) -> None:
         default_model = self._client.default_model
@@ -665,15 +708,12 @@ class MainWindow(QMainWindow):
         self._append_styled_line(text, theme.MUTED)
 
     def _append_separator(self) -> None:
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setFrameShadow(QFrame.Shadow.Plain)
-        line.setStyleSheet(f"color: {theme.MUTED}; background-color: {theme.MUTED};")
-        line.setFixedHeight(1)
-        self._add_output_widget(line)
+        self._add_output_widget(self._make_hrule())
 
     def _add_output_widget(self, widget: QWidget) -> None:
         """Insert ``widget`` before the trailing stretch and scroll to it."""
+        if self._output_empty.isVisible():
+            self._output_empty.setVisible(False)
         index = max(self._output_layout.count() - 1, 0)
         self._output_layout.insertWidget(index, widget)
         self.output.ensureWidgetVisible(widget)
@@ -686,6 +726,8 @@ class MainWindow(QMainWindow):
         for i in range(self._output_layout.count()):
             item = self._output_layout.itemAt(i)
             widget = item.widget() if item is not None else None
+            if widget is self._output_empty:
+                continue
             if isinstance(widget, QLabel):
                 parts.append(widget.text())
         return "\n".join(parts)

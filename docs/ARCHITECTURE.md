@@ -2,8 +2,9 @@
 
 ## Component Overview
 
-- **`Backend`**: Abstract protocol for LLM providers. Defines a standard `chat()` method and provides provider-neutral metadata such as `default_model` and token usage metrics.
-- **`LocalOllamaBackend`**: Implementation of `Backend` that wraps `OllamaClient` to provide local LLM capabilities via Ollama.
+- **`Backend`**: Abstract protocol for LLM providers. Defines standard `chat()` and `chat_stream()` methods and provides provider-neutral metadata such as `name`, `default_model` and token usage metrics.
+- **`LocalOllamaBackend`**: Implementation of `Backend` that wraps `OllamaClient` to provide local LLM capabilities via Ollama. Supports both synchronous and streaming chat.
+- **`CloudHTTPBackend`**: Implementation of `Backend` using the OpenAI-compatible SDK (e.g., for DeepSeek). Supports both synchronous and streaming chat with extended timeout handling.
 - **`State Module` (`aura_harness.state`)**: Provides a typed, immutable schema for the system state (`RunState`, `Plan`, `CodeArtifact`, etc.). Includes a `RepoMap` builder that uses AST parsing to map workspace symbols.
 - **`Station` (`aura_harness.stations`)**: Abstract base for functional units. Includes `CriticStation` for reviews and `WorkerStation` for code generation with internal reflexion loops.
 - **`Pipeline` (`aura_harness.pipeline`)**: Orchestration layer. Includes `LinearExecutor` which processes a `Plan` sequentially, and a CLI for running tasks through the pipeline.
